@@ -105,8 +105,8 @@ func TestRoomIsHappyLinkIsExactAndCaseSensitive(t *testing.T) {
 		source string
 		want   bool
 	}{
-		{"happylink", true},   // RoomInfo.java:57 精确相等
-		{"HappyLink", false},  // 大小写敏感
+		{"happylink", true},  // RoomInfo.java:57 精确相等
+		{"HappyLink", false}, // 大小写敏感
 		{"happylink ", false},
 		{"", false},
 	}

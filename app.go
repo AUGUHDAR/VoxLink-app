@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -104,6 +105,10 @@ type App struct {
 	settings     appSettings
 	engine       *connEngine
 
+	// logFiles 日志落盘出口（latest.log / debug.log），由入口层 openLogFiles 打开；
+	// 未打开时为 nil，netLog 只走 stderr + UI 事件（测试进程即如此）。
+	logFiles *logFiles
+
 	mu      sync.Mutex
 	state   string // "idle" | "hosting" | "in_room"
 	code    string
@@ -191,14 +196,34 @@ func sanitizeNetLogMessage(msg string) string {
 
 // netLog 记录网络层日志并推送 "net:log" 事件。
 // 出口消敏：消息经 sanitizeNetLogMessage 处理，确保不再含 IP/端口/地址字面量。
+// 三个出口与模组的 LOGGER 一一对应：stderr（控制台）、UI 事件（界面日志面板）、
+// 落盘 latest.log/debug.log（模组的对应物是 log4j 的 AppenderRefs，见 logfile.go）。
 func (a *App) netLog(level, msg string) {
 	clean := sanitizeNetLogMessage(msg)
 	log.Printf("[%s] %s", level, clean)
+	a.mu.Lock()
+	files := a.logFiles
+	a.mu.Unlock()
+	if files != nil {
+		files.Write(level, clean) // 消敏后才落盘：上传/附件里的文本与界面看到的一致
+	}
 	a.emit("net:log", map[string]any{
 		"level": level,
 		"msg":   clean,
 		"ts":    time.Now().UnixMilli(),
 	})
+}
+
+// openLogFiles 打开日志落盘（latest.log / debug.log），只由两个入口调用：
+// UI 版传 true（vanilla 语义：每次启动截断 latest.log），CLI 版传 false（一次性命令
+// 追加而不截断，否则启动器调一次 status 就把 UI 那一场的上传样本抹了）。
+// 刻意不在 NewApp/Init 里自动开：测试构造的 App 会指向真实的用户配置目录。
+func (a *App) openLogFiles(truncateLatest bool) {
+	a.mu.Lock()
+	if a.logFiles == nil {
+		a.logFiles = newLogFiles(filepath.Join(filepath.Dir(a.settingsPath), "logs"), truncateLatest)
+	}
+	a.mu.Unlock()
 }
 
 // ---- 内部状态辅助 ----
@@ -421,12 +446,22 @@ func (a *App) SaveSettings(settingsJSON string) string {
 		return wrapErr("INVALID_PARAMS", err.Error())
 	}
 
+	// 先校验再改状态：半途报错不能留下"内存已改、磁盘没写"的半套设置
+	var cleanTag *string
+	if req.ClientTag != nil {
+		clean, err := sanitizeClientTag(*req.ClientTag)
+		if err != nil {
+			return wrapErr("INVALID_PARAMS", err.Error()) // CLI 传超长标签要报错，不能静默丢掉
+		}
+		cleanTag = &clean
+	}
+
 	a.mu.Lock()
 	if req.Theme != "" {
 		a.settings.Theme = req.Theme
 	}
-	if req.ClientTag != nil {
-		a.settings.ClientTag = normalizeClientTag(*req.ClientTag)
+	if cleanTag != nil {
+		a.settings.ClientTag = *cleanTag
 	}
 	if req.RelayEnabled != nil {
 		a.settings.RelayEnabled = req.RelayEnabled
@@ -553,6 +588,8 @@ func (a *App) CreateRoom(reqJSON string) string {
 		HostPort    int    `json:"hostPort"`
 		Loader      string `json:"loader"`
 		GameVersion string `json:"gameVersion"`
+		// ClientTag 本次建房要显示的客户端标签（CLI --client-tag）。空则用设置里的持久值。
+		ClientTag string `json:"clientTag"`
 	}
 	if err := parseParams(reqJSON, &req); err != nil {
 		return wrapErr("INVALID_PARAMS", err.Error())
@@ -574,6 +611,22 @@ func (a *App) CreateRoom(reqJSON string) string {
 	visible := true
 	if req.Visible != nil {
 		visible = *req.Visible
+	}
+
+	// clientTag：本次建房的来源标签（CLI `room create --client-tag`）。给了就用它，
+	// 不给则回落到设置里的持久值；清洗后为空则不发。
+	// 报错而不是静默丢弃：这是面向开发者的入参，必须告诉他为什么没生效。
+	clientTag := a.clientTagOf()
+	if strings.TrimSpace(req.ClientTag) != "" {
+		clean, err := sanitizeClientTag(req.ClientTag)
+		if err != nil {
+			return wrapErr("INVALID_PARAMS", err.Error())
+		}
+		if clean == "" {
+			return wrapErr("INVALID_PARAMS",
+				"clientTag 没有可用字符（允许：字母/数字/下划线/连字符/中文/单个空格）")
+		}
+		clientTag = clean
 	}
 
 	// 会话互斥：hosting/in_room 时拒绝再建房（不再自动 LeaveRoom）。
@@ -607,10 +660,9 @@ func (a *App) CreateRoom(reqJSON string) string {
 		// （SignalingClient.java:192），本端对齐携带 appVersion。
 		"modVersion": appVersion,
 	}
-	// clientTag：启动器来源标记（kamucl 等），默认空不带。服务端 create 侧
-	// 校验/丢弃（roommanager.go:410-413），本端已在设置入口同款归一，为空则不发。
-	if tag := a.clientTagOf(); tag != "" {
-		body["clientTag"] = tag
+	// clientTag：来源标记，为空则整个字段不发（服务端 create 侧再校验一次）。
+	if clientTag != "" {
+		body["clientTag"] = clientTag
 	}
 	if req.Password != "" {
 		body["password"] = req.Password

@@ -337,7 +337,7 @@ func TestFedTunnelErrStopsPermanently(t *testing.T) {
 	c.start()
 
 	waitFedStatus(t, statuses, "中继节点拒绝隧道连接：ERR bad_token", true) // :136
-	waitFedStatus(t, statuses, fedMsgStopped, false)                       // :163
+	waitFedStatus(t, statuses, fedMsgStopped, false)             // :163
 	c.wait()
 
 	if c.IsRunning() {

@@ -56,16 +56,16 @@ const (
 // 状态文案：与 FedTunnelClient.java 的硬编码中文串逐字一致（:128,136,156,159,163）。
 // 这些串不进 lang 文件、只走日志（规格 6.3 / D4）。
 const (
-	fedMsgOnlineFmt    = "互通房间已上线：%s 端口 %d" // :128
-	fedMsgRejectedFmt  = "中继节点拒绝隧道连接：%s"   // :136
-	fedMsgGiveUp       = "无法连接中继节点，互通隧道已停止" // :156
-	fedMsgRetryFmt     = "隧道连接中断，%d 秒后重试"    // :159
-	fedMsgStopped      = "互通隧道已停止"                // :163
-	fedLoggerName      = "VoxLink-FedTunnel"             // :37
-	fedThreadPoolName  = "voxlink-fed-tunnel"            // :49
-	fedThreadPipeName  = "voxlink-fed-pipe"              // :224
-	fedLineReadChunk   = 4096                            // 单次 socket 读缓冲（readLine 的下层语义）
-	fedPipeCopyBufSize = 32 * 1024                       // transferTo 的默认拷贝粒度（:219,229）
+	fedMsgOnlineFmt    = "互通房间已上线：%s 端口 %d"   // :128
+	fedMsgRejectedFmt  = "中继节点拒绝隧道连接：%s"      // :136
+	fedMsgGiveUp       = "无法连接中继节点，互通隧道已停止"   // :156
+	fedMsgRetryFmt     = "隧道连接中断，%d 秒后重试"     // :159
+	fedMsgStopped      = "互通隧道已停止"            // :163
+	fedLoggerName      = "VoxLink-FedTunnel"  // :37
+	fedThreadPoolName  = "voxlink-fed-tunnel" // :49
+	fedThreadPipeName  = "voxlink-fed-pipe"   // :224
+	fedLineReadChunk   = 4096                 // 单次 socket 读缓冲（readLine 的下层语义）
+	fedPipeCopyBufSize = 32 * 1024            // transferTo 的默认拷贝粒度（:219,229）
 )
 
 // FedTunnelListener 对应 FedTunnelClient.Listener（:33-35）。
@@ -80,8 +80,8 @@ type FedTunnelClient struct {
 	token      string // :42
 	localPort  int    // :43 本机 MC 端口
 
-	hostAlive   func() bool  // :44 BooleanSupplier
-	playerCount func() int    // :45 IntSupplier（可为 null → 发 0，:143）
+	hostAlive   func() bool       // :44 BooleanSupplier
+	playerCount func() int        // :45 IntSupplier（可为 null → 发 0，:143）
 	listener    FedTunnelListener // :46
 
 	running  atomic.Bool   // :47 AtomicBoolean(true)
@@ -90,7 +90,7 @@ type FedTunnelClient struct {
 	wg       sync.WaitGroup // :48 newCachedThreadPool 上提交的任务集合
 
 	mu         sync.Mutex
-	control    net.Conn // :54 volatile Socket control
+	control    net.Conn     // :54 volatile Socket control
 	publicPort atomic.Int64 // :55 volatile int publicPort = -1
 }
 
@@ -99,17 +99,17 @@ type FedTunnelClient struct {
 func NewFedTunnelClient(host string, tunnelPort int, code, token string, localPort int,
 	hostAlive func() bool, playerCount func() int, listener FedTunnelListener) *FedTunnelClient {
 	c := &FedTunnelClient{
-		host:       host,
-		tunnelPort: tunnelPort,
-		code:       code,
+		host:        host,
+		tunnelPort:  tunnelPort,
+		code:        code,
 		token:       token,
-		localPort:  localPort,
+		localPort:   localPort,
 		hostAlive:   hostAlive,
 		playerCount: playerCount,
 		listener:    listener,
 		quit:        make(chan struct{}),
 	}
-	c.running.Store(true) // :47
+	c.running.Store(true)                           // :47
 	c.publicPort.Store(int64(fedInitialPublicPort)) // :55
 	return c
 }
@@ -128,8 +128,8 @@ func (c *FedTunnelClient) start() {
 // 注意与 Java 一致：不主动关在途 DATA 连接（那边的 daemon 线程靠 JVM 退出回收；
 // Go 无 daemon 线程，由 pipe() 里的 quit 看门狗拆除。
 func (c *FedTunnelClient) stop() {
-	c.running.Store(false) // :74
-	c.closeControl()       // :75 closeQuietly(this.control)
+	c.running.Store(false)                  // :74
+	c.closeControl()                        // :75 closeQuietly(this.control)
 	c.quitOnce.Do(func() { close(c.quit) }) // :76 pool.shutdownNow()
 }
 
@@ -161,19 +161,19 @@ func (c *FedTunnelClient) runLoop() {
 		if !c.running.Load() { // :151-153
 			break
 		}
-		failures++ // :154
+		failures++                     // :154
 		if failures > fedMaxFailures { // :155-158
 			c.notify(fedMsgGiveUp, true)
 			break
 		}
-		c.notify(fmt.Sprintf(fedMsgRetryFmt, fedBackoffSeconds(failures)), false) // :159
+		c.notify(fmt.Sprintf(fedMsgRetryFmt, fedBackoffSeconds(failures)), false)      // :159
 		if !c.sleepQuietly(time.Duration(fedBackoffMs(failures)) * time.Millisecond) { // :160
 			// stop() 打断睡眠：Java 里 interrupt 后回到 while(running) 判假退出，
 			// 同样落到 :162-163 的收尾，这里保持等价（break 而非 return）。
 			break
 		}
 	}
-	c.running.Store(false) // :162
+	c.running.Store(false)         // :162
 	c.notify(fedMsgStopped, false) // :163
 }
 
@@ -202,8 +202,8 @@ func (c *FedTunnelClient) controlSession() (bool, error) {
 		_ = conn.Close()
 	}()
 
-	w := bufio.NewWriter(conn)                                       // :101 BufferedWriter(OutputStreamWriter(UTF_8))
-	br := bufio.NewReader(conn)                                      // :102 BufferedReader(InputStreamReader(UTF_8))
+	w := bufio.NewWriter(conn)                                                                           // :101 BufferedWriter(OutputStreamWriter(UTF_8))
+	br := bufio.NewReader(conn)                                                                          // :102 BufferedReader(InputStreamReader(UTF_8))
 	if _, err := io.WriteString(w, fedHelloLine(c.code, c.token, fedLanIp(), c.localPort)); err != nil { // :104
 		return true, err
 	}
@@ -213,7 +213,7 @@ func (c *FedTunnelClient) controlSession() (bool, error) {
 
 	reader := &fedLineReader{br: br, conn: conn}
 	lastPing := time.Now().UnixMilli() // :107
-	for c.running.Load() { // :108
+	for c.running.Load() {             // :108
 		if !c.alive() { // :109-111
 			return true, nil
 		}
@@ -230,7 +230,7 @@ func (c *FedTunnelClient) controlSession() (bool, error) {
 				return true, nil
 			}
 		}
-		now := time.Now().UnixMilli() // :141
+		now := time.Now().UnixMilli()         // :141
 		if now-lastPing > fedPingIntervalMs { // :142
 			if _, err := io.WriteString(w, fedPingLine(c.fedPlayers())); err != nil { // :143
 				return true, err
@@ -258,7 +258,7 @@ func (c *FedTunnelClient) handleControlLine(raw string) (bool, error) {
 	switch {
 	case strings.HasPrefix(line, "OK"): // :120-128
 		parts := strings.Fields(line) // :121 line.split("\\s+")
-		if len(parts) > 1 { // :122
+		if len(parts) > 1 {           // :122
 			if p, perr := strconv.Atoi(parts[1]); perr == nil { // :123-126 吞 NumberFormatException
 				c.publicPort.Store(int64(p))
 			}
@@ -266,7 +266,7 @@ func (c *FedTunnelClient) handleControlLine(raw string) (bool, error) {
 		c.notify(fmt.Sprintf(fedMsgOnlineFmt, c.host, c.GetPublicPort()), false) // :128
 	case strings.HasPrefix(line, "CONNECT"): // :129-134
 		parts := strings.Fields(line) // :130
-		if len(parts) > 1 { // :131
+		if len(parts) > 1 {           // :131
 			id := parts[1] // :132 不透明字符串：idBase(8位hex)+自增序号(hex)，绝不解析
 			c.wg.Add(1)
 			go func() { // :133 pool.submit(() -> openData(id))，不在读线程内联
@@ -335,7 +335,7 @@ func (c *FedTunnelClient) openData(id string) {
 	if err != nil {
 		return
 	}
-	defer up.Close() // :194 try-with-resources
+	defer up.Close()                     // :194 try-with-resources
 	if tc, ok := up.(*net.TCPConn); ok { // :196
 		_ = tc.SetNoDelay(true)
 	}
@@ -347,7 +347,7 @@ func (c *FedTunnelClient) openData(id string) {
 	if err != nil {
 		return
 	}
-	defer local.Close() // :201 嵌套 try-with-resources
+	defer local.Close()                     // :201 嵌套 try-with-resources
 	if tc, ok := local.(*net.TCPConn); ok { // :203
 		_ = tc.SetNoDelay(true)
 	}

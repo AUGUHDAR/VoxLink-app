@@ -66,11 +66,11 @@ func (p cliParam) read(fs *flag.FlagSet) (any, error) {
 
 // cliCommand 一条命令。Single 非空表示流程层收的是裸字符串（如房号/工单号）而非 JSON 对象。
 type cliCommand struct {
-	Path   string
+	Path    string
 	Summary string
-	Single string // 取 payload 里哪个字段作为裸字符串参数
-	Params []cliParam
-	Run    func(app *App, ctx context.Context, payload string) (string, error)
+	Single  string // 取 payload 里哪个字段作为裸字符串参数
+	Params  []cliParam
+	Run     func(app *App, ctx context.Context, payload string) (string, error)
 }
 
 // roomCreateParams 建房参数（与 UI 版同一套字段名）。
@@ -82,6 +82,10 @@ var roomCreateParams = []cliParam{
 	{Name: "loader", Field: "loader", Kind: "string", Default: "unknown", Help: "加载器名，如实上报"},
 	{Name: "game-version", Field: "gameVersion", Kind: "string", Default: "unknown", Help: "游戏版本"},
 	{Name: "public", Field: "visible", Kind: "bool", Default: true, Help: "是否公开进大厅"},
+	// clientTag 给后台/大厅显示"这是哪个客户端"（模组侧显示的是 forge/neoforge 这类加载器标签）。
+	// 上限 10 个字（含中文），清洗后随本次 create 上报；不传则用 `settings save --client-tag` 的持久值。
+	{Name: "client-tag", Field: "clientTag", Kind: "string",
+		Help: "服务端显示的客户端标签，≤10 字（例：--client-tag=pcl2 / --client-tag=星光启动器）"},
 }
 
 var roomJoinParams = []cliParam{
@@ -132,12 +136,14 @@ var cliCommands = []cliCommand{
 		Run: func(a *App, _ context.Context, _ string) (string, error) { return a.GetSessionState(), nil }},
 	{Path: "room info", Summary: "查询房间公开信息", Single: "code",
 		Params: []cliParam{{Name: "code", Field: "code", Kind: "string", Help: "6 位房号"}},
-		Run: func(a *App, _ context.Context, p string) (string, error) { return a.RoomInfo(singleOf(p, "code")), nil }},
+		Run:    func(a *App, _ context.Context, p string) (string, error) { return a.RoomInfo(singleOf(p, "code")), nil }},
 	{Path: "room update", Summary: "修改自己房间的信息", Params: roomUpdateParams,
 		Run: func(a *App, _ context.Context, p string) (string, error) { return a.SendRoomUpdate(p), nil }},
 	{Path: "room mods", Summary: "查询房间模组清单", Single: "code",
 		Params: []cliParam{{Name: "code", Field: "code", Kind: "string", Help: "6 位房号"}},
-		Run: func(a *App, _ context.Context, p string) (string, error) { return a.GetRoomMods(singleOf(p, "code")), nil }},
+		Run: func(a *App, _ context.Context, p string) (string, error) {
+			return a.GetRoomMods(singleOf(p, "code")), nil
+		}},
 
 	{Path: "lobby list", Summary: "列出大厅房间", Params: lobbyListParams,
 		Run: func(a *App, _ context.Context, p string) (string, error) { return a.ListRooms(p), nil }},
@@ -147,7 +153,13 @@ var cliCommands = []cliCommand{
 	{Path: "settings get", Summary: "读取设置",
 		Run: func(a *App, _ context.Context, _ string) (string, error) { return a.GetSettings(), nil }},
 	{Path: "settings save", Summary: "保存设置",
-		Params: []cliParam{{Name: "theme", Field: "theme", Kind: "string", Help: "light|dark"}},
+		Params: []cliParam{
+			{Name: "theme", Field: "theme", Kind: "string", Help: "light|dark"},
+			{Name: "client-tag", Field: "clientTag", Kind: "string",
+				Help: "持久客户端标签（≤10 字）；room create --client-tag 只影响当次"},
+			{Name: "relay-enabled", Field: "relayEnabled", Kind: "bool", Default: true,
+				Help: "是否允许中继（默认开）"},
+		},
 		Run: func(a *App, _ context.Context, p string) (string, error) { return a.SaveSettings(p), nil }},
 
 	{Path: "relay status", Summary: "中继服务是否可用",
@@ -168,17 +180,23 @@ var cliCommands = []cliCommand{
 		Run: func(a *App, _ context.Context, p string) (string, error) { return a.TicketSubmit(p), nil }},
 	{Path: "ticket detail", Summary: "工单详情", Single: "id",
 		Params: []cliParam{{Name: "id", Field: "id", Kind: "string", Help: "工单号"}},
-		Run: func(a *App, _ context.Context, p string) (string, error) { return a.TicketDetail(singleOf(p, "id")), nil }},
+		Run: func(a *App, _ context.Context, p string) (string, error) {
+			return a.TicketDetail(singleOf(p, "id")), nil
+		}},
 	{Path: "ticket reply", Summary: "追问", Params: ticketReplyParams,
 		Run: func(a *App, _ context.Context, p string) (string, error) { return a.TicketReply(p), nil }},
 	{Path: "ticket retract", Summary: "撤回自己最后一条追问", Params: ticketRetractParams,
 		Run: func(a *App, _ context.Context, p string) (string, error) { return a.TicketRetract(p), nil }},
 	{Path: "ticket viewed", Summary: "标记已读", Single: "id",
 		Params: []cliParam{{Name: "id", Field: "id", Kind: "string", Help: "工单号"}},
-		Run: func(a *App, _ context.Context, p string) (string, error) { return a.TicketViewed(singleOf(p, "id")), nil }},
+		Run: func(a *App, _ context.Context, p string) (string, error) {
+			return a.TicketViewed(singleOf(p, "id")), nil
+		}},
 	{Path: "ticket delete", Summary: "本地软删除工单", Single: "id",
 		Params: []cliParam{{Name: "id", Field: "id", Kind: "string", Help: "工单号"}},
-		Run: func(a *App, _ context.Context, p string) (string, error) { return a.TicketDelete(singleOf(p, "id")), nil }},
+		Run: func(a *App, _ context.Context, p string) (string, error) {
+			return a.TicketDelete(singleOf(p, "id")), nil
+		}},
 }
 
 // lookupCommand 用最长前缀匹配 "域 动作"，返回剩余参数。
@@ -220,21 +238,21 @@ func describePayload() string {
 		})
 	}
 	return wrapOK(map[string]any{
-		"version":           appVersion,
-		"protocolVersion":   clientProtocolVersion,
-		"capabilities":      appCapabilities,
-		"build":             "cli",
+		"version":         appVersion,
+		"protocolVersion": clientProtocolVersion,
+		"capabilities":    appCapabilities,
+		"build":           "cli",
 		"os":              runtime.GOOS,
-		"arch":              runtime.GOARCH,
-		"envelope":          "{ok,data} / {ok:false,error,code,message}",
-		"exitCodes":         map[string]any{"0": "ok", "1": "business failure", "2": "usage error"},
+		"arch":            runtime.GOARCH,
+		"envelope":        "{ok,data} / {ok:false,error,code,message}",
+		"exitCodes":       map[string]any{"0": "ok", "1": "business failure", "2": "usage error"},
 		"globalFlags": []map[string]any{
 			{"name": "--events", "kind": "string", "help": "none|ndjson，长任务事件流"},
 			{"name": "--timeout", "kind": "duration", "help": "驻留上限，如 90s；0=不限"},
 			{"name": "--json", "kind": "string", "help": "直接给参数 JSON 对象"},
 		},
-		"events": knownEvents(),
-		"commands":  cmds,
+		"events":   knownEvents(),
+		"commands": cmds,
 	})
 }
 

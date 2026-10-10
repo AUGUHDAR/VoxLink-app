@@ -39,9 +39,9 @@ type modSyncEntry struct {
 	GameVersions  []string `json:"gameVersions"`
 
 	// 以下三项不序列化（ModSyncEntry.java:20-25）
-	foundOn     string // "mr"/"cf"，仅分组展示用
+	foundOn      string   // "mr"/"cf"，仅分组展示用
 	depProjectID []string // resolver 用：MR required 前置 project_id
-	cfDepID     []string // resolver 用：CF required 前置 modId:fileId
+	cfDepID      []string // resolver 用：CF required 前置 modId:fileId
 }
 
 // newModSyncEntry 对应 Java 的字段初始化（:8-28：字符串恒为 ""、列表恒为空表、size=0）。

@@ -251,10 +251,10 @@ func (a *App) modSyncFetchWithRetry(roomCode, scope string) modSyncFetchResult {
 		}
 
 		m := map[string]any{
-			"loader":  modSyncLoaderOrDefault(data, "unknown"), // :328（缺键按 "unknown"）
-			"mcVersion": jstr(data, "mcVersion"),
-			"mods":        modSyncArrayOrEmpty(data, "mods"),
-			"unknownMods": modSyncArrayOrEmpty(data, "unknownMods"),
+			"loader":          modSyncLoaderOrDefault(data, "unknown"), // :328（缺键按 "unknown"）
+			"mcVersion":       jstr(data, "mcVersion"),
+			"mods":            modSyncArrayOrEmpty(data, "mods"),
+			"unknownMods":     modSyncArrayOrEmpty(data, "unknownMods"),
 			"protocolVersion": jstr(data, "protocolVersion"),
 		}
 		// mods 为空时不再一律静默（:336-341）：unknownMods 非空仍要给玩家看；
@@ -314,12 +314,12 @@ func modSyncArrayOrEmpty(o map[string]any, key string) []any {
 type modSyncDiffResult struct {
 	Downloadable []*modSyncEntry `json:"downloadable"`
 	// ManualEntries：需手动安装的条目（MR 未收录/兼容性不符）（:410-411）
-	ManualEntries []*modSyncEntry `json:"manual"`
+	ManualEntries []*modSyncEntry   `json:"manual"`
 	Unresolvable  []modSyncLangLine `json:"unresolvable"`
 	// VersionDiff：同类模组但版本与房主不同 —— 仅强提示，绝不移动/删除用户已装文件
 	// （运行中的 jar 被占用且属用户资产）（:413-414）
 	VersionDiff []modSyncLangLine `json:"versionDiff"`
-	SkipKeys    []string            `json:"skipKeys"`
+	SkipKeys    []string          `json:"skipKeys"`
 }
 
 func newModSyncDiffResult() *modSyncDiffResult {
@@ -517,11 +517,11 @@ type modSyncGateResponse struct {
 	Loader    string `json:"loader"`
 	MCVersion string `json:"mcVersion"`
 	// PendingNote：直通时要在连接启动后播报的一行（logui 键；level 0=提示 2=警告）
-	PendingNote  *modSyncLangLine `json:"pendingNote,omitempty"`
-	NoteLevel    int              `json:"noteLevel"`
-	Downloadable []*modSyncEntry  `json:"downloadable,omitempty"`
-	Incompatible []*modSyncEntry  `json:"incompatible,omitempty"`
-	NotFound     []*modSyncEntry  `json:"notfound,omitempty"`
+	PendingNote  *modSyncLangLine  `json:"pendingNote,omitempty"`
+	NoteLevel    int               `json:"noteLevel"`
+	Downloadable []*modSyncEntry   `json:"downloadable,omitempty"`
+	Incompatible []*modSyncEntry   `json:"incompatible,omitempty"`
+	NotFound     []*modSyncEntry   `json:"notfound,omitempty"`
 	Unresolvable []modSyncLangLine `json:"unresolvable,omitempty"`
 	VersionDiff  []modSyncLangLine `json:"versionDiff,omitempty"`
 	SkipKeys     []string          `json:"skipKeys,omitempty"`
@@ -908,8 +908,8 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 		if shouldAbort() {
 			a.modSyncEmitProgress(entries, i, doneFiles, bytesDone, totalBytes, "", 0)
 			a.emit("modsync:download", map[string]any{
-				"outcome":   "cancelled",
-				"note":      newModSyncLangLine(langModSyncDownloadCancelled),
+				"outcome":    "cancelled",
+				"note":       newModSyncLangLine(langModSyncDownloadCancelled),
 				"downloaded": succeeded,
 			})
 			return

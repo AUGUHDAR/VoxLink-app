@@ -45,6 +45,7 @@ func (p wailsPicker) PickFiles(title string, filters []pickFilter) ([]string, er
 // （loadSettings 期间若有日志要出口，此时 sink 已就位）。
 func (a *App) startup(ctx context.Context) {
 	a.AttachSink(wailsSink{ctx: ctx}, wailsPicker{ctx: ctx})
+	a.openLogFiles(true) // 在任何日志之前就绪（log4j 在 MC 启动早期就挂好 AppenderRef）
 	a.Init()
 }
 

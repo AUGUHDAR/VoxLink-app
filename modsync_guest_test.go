@@ -25,10 +25,10 @@ func modSyncTestEnv(t *testing.T) modSyncEnv {
 
 func modSyncTestManifest(mods []any, unknown []any) map[string]any {
 	m := map[string]any{
-		"loader":        "fabric",
-		"mcVersion":     "1.20.1",
-		"mods":          mods,
-		"unknownMods":   unknown,
+		"loader":          "fabric",
+		"mcVersion":       "1.20.1",
+		"mods":            mods,
+		"unknownMods":     unknown,
 		"protocolVersion": modSyncProtocolVersion,
 	}
 	return m

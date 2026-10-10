@@ -68,8 +68,8 @@ func TestModSyncCfDepIDsOf(t *testing.T) {
 	f := map[string]any{"dependencies": []any{
 		map[string]any{"relationType": "3", "modId": float64(3061), "fileId": float64(4528)},
 		map[string]any{"relationType": "2", "modId": float64(1), "fileId": float64(2)}, // optional：不收
-		map[string]any{"relationType": "3", "modId": float64(0), "fileId": float64(5)},  // modId<=0：不收
-		map[string]any{"relationType": "3", "modId": "x", "fileId": "y"},                // 非数字：跳过
+		map[string]any{"relationType": "3", "modId": float64(0), "fileId": float64(5)}, // modId<=0：不收
+		map[string]any{"relationType": "3", "modId": "x", "fileId": "y"},               // 非数字：跳过
 	}}
 	got := modSyncCfDepIDsOf(f)
 	if len(got) != 1 || got[0] != "3061:4528" {

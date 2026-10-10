@@ -99,8 +99,8 @@ func modSyncArgToString(a any) string {
 	}
 }
 
-func modSyncLogInfo(format string, args ...any) { modSyncLog("info", format, args...) }
-func modSyncLogWarn(format string, args ...any) { modSyncLog("warn", format, args...) }
+func modSyncLogInfo(format string, args ...any)  { modSyncLog("info", format, args...) }
+func modSyncLogWarn(format string, args ...any)  { modSyncLog("warn", format, args...) }
 func modSyncLogError(format string, args ...any) { modSyncLog("error", format, args...) }
 
 func modSyncLog(level, format string, args ...any) {

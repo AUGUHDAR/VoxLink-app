@@ -203,7 +203,7 @@ func (a *App) startFedTunnelForRoom(room map[string]any, localPort int) {
 	a.stopFedTunnel() // :1114
 	code := fedHelloCode(room)
 	t := NewFedTunnelClient(
-		roomStr(room, fedKeyHost), // getFedHost()
+		roomStr(room, fedKeyHost),       // getFedHost()
 		roomInt(room, fedKeyTunnelPort), // getFedTunnelPort()
 		code,
 		roomStr(room, fedKeyToken), // getFedToken()

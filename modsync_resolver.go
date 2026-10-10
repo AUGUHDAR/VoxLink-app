@@ -226,8 +226,8 @@ func modSyncResolveBatch(entries []*modSyncEntry, pass int, ctx *modSyncResolveC
 
 // modSyncFailedList = CopyOnWriteArrayList<ModSyncEntry>（:142）
 type modSyncFailedList struct {
-	mu     sync.Mutex
-	items  []*modSyncEntry
+	mu    sync.Mutex
+	items []*modSyncEntry
 }
 
 func (l *modSyncFailedList) add(e *modSyncEntry) {

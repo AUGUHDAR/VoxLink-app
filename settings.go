@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // appSettings 持久化设置，存于 %APPDATA%/VoxLinkApp/settings.json。
@@ -104,22 +105,42 @@ func validateServerURL(u string) bool {
 	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
-// clientTagPattern 与服务端 roommanager.go:411 的正则逐字节一致（^[a-z0-9_\-]{1,32}$，
-// Go RE2 里 `_`/`-` 在字符类中无需转义，写法 ^[a-z0-9_-]{1,32}$ 语义相同）。
-var clientTagPattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+// clientTagMaxRunes 标签长度上限（按"字"算，中文一个字算一个：后台就是一行徽章，
+// 再长会挤掉房名）。CLI 与 SaveSettings 都以此拒绝，服务端同值兜底。
+const clientTagMaxRunes = 10
 
-// normalizeClientTag 复刻服务端处理（server-go/roommanager.go:410-413）：
-// 先 TrimSpace 再 ToLower，然后匹配正则；不合规"丢弃"为空而非报错——
-// 与服务端对非法 clientTag 静默置空的口径一致（兼容老客户端语义）。
+// clientTagPattern 清洗后的字符集：小写字母/数字/下划线/连字符 + 任意 CJK。
+// 空格保留在"词"之间（启动器名常带空格，如"PCL2"→"pcl2"、"My Launcher"），
+// 但首尾空白先 Trim。控制字符、引号、尖括号一律剔掉——后台是 HTML 渲染，
+// 就算模板会转义，也不该让这类字符进入存储。
+var clientTagPattern = regexp.MustCompile(`[^0-9a-z_\-\p{Han} ]`)
+
+// normalizeClientTag 是"静默"版：与服务端 roommanager.normalizeClientTag 同一套口径
+// （清洗 + 截到 10 字），用于读磁盘上可能被手改过的设置值 —— 那里不该因为一个脏标签
+// 就整个不上报，截短了照样是有效标识。
 func normalizeClientTag(tag string) string {
+	r := []rune(cleanClientTag(tag))
+	if len(r) > clientTagMaxRunes {
+		return string(r[:clientTagMaxRunes])
+	}
+	return string(r)
+}
+
+// sanitizeClientTag 是 normalizeClientTag 的报错版：CLI 建房与设置写回用它，
+// 因为面向开发者的入口必须告诉他"你传的标签为什么没生效"（超 10 个字直接拒绝）。
+func sanitizeClientTag(tag string) (string, error) {
+	clean := cleanClientTag(tag)
+	if n := utf8.RuneCountInString(clean); n > clientTagMaxRunes {
+		return "", fmt.Errorf("clientTag 最多 %d 个字（当前 %d 个）", clientTagMaxRunes, n)
+	}
+	return clean, nil
+}
+
+// cleanClientTag 只做字符清洗与空格归一，不管长度。
+func cleanClientTag(tag string) string {
 	t := strings.ToLower(strings.TrimSpace(tag))
-	if t == "" {
-		return ""
-	}
-	if !clientTagPattern.MatchString(t) {
-		return ""
-	}
-	return t
+	t = clientTagPattern.ReplaceAllString(t, "")
+	return strings.Join(strings.Fields(t), " ") // 连续空格压成一个
 }
 
 // validateRoomCode 校验 6 位房间码字符集。

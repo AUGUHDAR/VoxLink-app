@@ -32,8 +32,8 @@ const (
 
 // modSyncJarScan 对应 Java 的 ListModJarsResult（:91-99）。
 type modSyncJarScan struct {
-	Jars     []string          // 活跃 .jar 的完整路径（按文件名排序）
-	Disabled map[string]bool   // 被禁用 jar 的"原 .jar 文件名"集合
+	Jars     []string        // 活跃 .jar 的完整路径（按文件名排序）
+	Disabled map[string]bool // 被禁用 jar 的"原 .jar 文件名"集合
 }
 
 func newModSyncJarScan() modSyncJarScan {
@@ -121,7 +121,7 @@ func modSyncListJars(dir string) []string {
 }
 
 // modSyncSha1File / modSyncSha512File 对应 sha1(Path)/sha512(Path)（:101-107）。
-func modSyncSha1File(path string) (string, error)  { return modSyncHashFile(path, "SHA-1") }
+func modSyncSha1File(path string) (string, error)   { return modSyncHashFile(path, "SHA-1") }
 func modSyncSha512File(path string) (string, error) { return modSyncHashFile(path, "SHA-512") }
 
 // modSyncSha1OfBytes 对应 sha1OfBytes(byte[])（:110-122）：字节数组的 sha1 hex，

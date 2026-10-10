@@ -32,7 +32,7 @@ const phaseFed = "fed"
 // voxlink.connection.fed_setup / fed_failed），app 前端没有同一套 lang 目录，
 // 这里直接用模组 lang 文件里同键的原文。
 const (
-	fedTextSetup = "正在通过互通中继连接房间..."
+	fedTextSetup  = "正在通过互通中继连接房间..."
 	fedTextFailed = "互通房间连接失败"
 )
 
@@ -73,12 +73,12 @@ type fedBridge struct {
 	running   atomic.Bool // :46 running
 	cancelled atomic.Bool // :47 cancelled
 
-	mu           sync.Mutex
-	joinerLn     net.Listener // :50 joinerServer
-	joinerPort   int          // :51 joinerPort（Java 初值 -1）
-	currentHost  string       // :55 currentHostIp
-	currentHostPort int       // :56 currentHostPort
-	pairs        map[*fedPair]struct{} // :53 activePairs
+	mu              sync.Mutex
+	joinerLn        net.Listener          // :50 joinerServer
+	joinerPort      int                   // :51 joinerPort（Java 初值 -1）
+	currentHost     string                // :55 currentHostIp
+	currentHostPort int                   // :56 currentHostPort
+	pairs           map[*fedPair]struct{} // :53 activePairs
 }
 
 // errNoFedLocalAddr 本地桥监听地址不可用（异常形态，正常 ListenTCP 不会走到）。
@@ -162,20 +162,20 @@ func (a *App) connectFedIfHappyLink() {
 		return
 	}
 	a.netLog("info", "[joinRoom] Relay-tunnel room: fedAddress="+roomFedAddress(room)) // :828
-	a.engine.connectFed(room) // :829
+	a.engine.connectFed(room)                                                          // :829
 }
 
 // connectFed 逐句对应 ConnectionManager.java:10248-10274。
 // fedAddress 由服务端产出为 host + ":" + port（server-go/hlmaster.go:1431），
 // 解析刻意用 LastIndex(':')（:10250）以容忍 IPv6 形态的字面地址。
 func (e *connEngine) connectFed(room map[string]any) {
-	addr := roomFedAddress(room) // :10249 getFedAddress()
+	addr := roomFedAddress(room)        // :10249 getFedAddress()
 	sep := strings.LastIndex(addr, ":") // :10250
 	if sep <= 0 || sep == len(addr)-1 { // :10251
 		e.notifyState(phaseFed, statusFailed, "", fedTextFailed) // :10252 fed_failed(fatal)
 		return
 	}
-	host := addr[:sep] // :10255
+	host := addr[:sep]                      // :10255
 	port, err := strconv.Atoi(addr[sep+1:]) // :10258
 	if err != nil {
 		e.notifyState(phaseFed, statusFailed, "", fedTextFailed) // :10260
@@ -222,7 +222,7 @@ func (e *connEngine) fedConnectToHost(host string, port int) (int, string) {
 // connectToHost 对应 P2PBridge.connectToHost（:155-176）。
 func (b *fedBridge) connectToHost(host string, port int) int {
 	b.cancelled.Store(false) // :156
-	if b.running.Load() { // :157-165（isRunning() = running.get()，:845-847）
+	if b.running.Load() {    // :157-165（isRunning() = running.get()，:845-847）
 		if jp := b.currentJoinerPort(); jp > 0 {
 			return jp // :160-162 已有桥直接复用
 		}
@@ -274,7 +274,7 @@ func (b *fedBridge) attemptBridge(host string, port, attempt int) int {
 	hostSocket := b.tryConnectWithRetry(host, port) // :201
 	if hostSocket == nil {
 		b.bridgeLog("error", "互通 joiner：无法连接中继 "+host+":"+strconv.Itoa(port)) // :203
-		b.running.Store(false) // :204
+		b.running.Store(false)                                                // :204
 		return -1
 	}
 	b.bridgeLog("info", "互通 joiner：已连上中继") // :208
@@ -286,7 +286,7 @@ func (b *fedBridge) attemptBridge(host string, port, attempt int) int {
 		b.running.Store(false) // :228
 		return -1
 	}
-	b.setJoiner(ln, jp, host, port) // :211-216
+	b.setJoiner(ln, jp, host, port)               // :211-216
 	b.bridgeLog("info", "互通 joiner：本地桥已就绪，转发至中继") // :218
 
 	// :219-221 复用连接前再确认 nodelay/缓冲（tryConnectWithRetry 已设，这里幂等重设）
@@ -387,7 +387,7 @@ func (b *fedBridge) acceptJoinerConnectionPreconnected(js net.Listener, preconne
 			acceptFailed = true // :481-483 超时→continue 的语义由 running/Close 承担
 			break
 		}
-		fedTuneSocket(mcClient) // :485-487
+		fedTuneSocket(mcClient)                       // :485-487
 		b.bridgeLog("info", "互通 joiner：MC 客户端已连入本地桥") // :488
 
 		var hostSocket net.Conn
@@ -404,11 +404,11 @@ func (b *fedBridge) acceptJoinerConnectionPreconnected(js net.Listener, preconne
 			closeQuietlyConn(mcClient)
 			continue
 		}
-		label, labelRev := fedBridgeLabels(hostSocket) // :505-506
+		label, labelRev := fedBridgeLabels(hostSocket)       // :505-506
 		pair := &fedPair{client: mcClient, host: hostSocket} // :507
-		b.addPair(pair)                                     // :508
-		go b.bridge(pair, pair.client, pair.host, label) // :510
-		go b.bridge(pair, pair.host, pair.client, labelRev) // :511
+		b.addPair(pair)                                      // :508
+		go b.bridge(pair, pair.client, pair.host, label)     // :510
+		go b.bridge(pair, pair.host, pair.client, labelRev)  // :511
 	}
 	if acceptFailed && preconnected != nil { // :519-524 catch 分支关闭预连接
 		closeQuietlyConn(preconnected)
@@ -439,7 +439,7 @@ func (b *fedBridge) bridge(pair *fedPair, from, to net.Conn, label string) {
 		_ = tc.SetKeepAlive(true)
 	}
 	buf := make([]byte, fedBridgeBufferSize) // :720
-	for b.running.Load() { // :724（Go 无 isClosed() 查询，靠读写错误退出同一循环）
+	for b.running.Load() {                   // :724（Go 无 isClosed() 查询，靠读写错误退出同一循环）
 		_ = from.SetReadDeadline(time.Now().Add(fedBridgeReadTimeout)) // :711 setSoTimeout(60000)
 		n, err := from.Read(buf)                                       // :727
 		if n > 0 {
@@ -454,18 +454,18 @@ func (b *fedBridge) bridge(pair *fedPair, from, to net.Conn, label string) {
 			break // :728-729 bytesRead == -1（EOF）/ 其它 IO 错误
 		}
 	}
-	pair.close() // :749
+	pair.close()       // :749
 	b.removePair(pair) // :750
 }
 
 // disconnect 对应 :768-806（不打印调用栈，其余一致）。
 func (b *fedBridge) disconnect() {
-	b.cancelled.Store(true) // :772
-	b.running.Store(false) // :773（:232 与 sleepInterruptible 据此立刻短路）
+	b.cancelled.Store(true)               // :772
+	b.running.Store(false)                // :773（:232 与 sleepInterruptible 据此立刻短路）
 	for _, p := range b.snapshotPairs() { // :776-778
 		p.close()
 	}
-	b.clearPairs() // :780
+	b.clearPairs()       // :780
 	ln := b.takeJoiner() // :799-804 joinerServer.close() 并置空
 	if ln != nil {
 		_ = ln.Close()

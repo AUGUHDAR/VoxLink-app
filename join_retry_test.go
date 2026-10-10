@@ -76,18 +76,19 @@ func TestJoinBodyIdentityFields(t *testing.T) {
 	if appVersion == "" || !strings.Contains(httpUserAgent, appVersion) {
 		t.Error("appVersion 应参与上报标识")
 	}
-	// clientTag 归一口径与服务端一致（roommanager.go:410-413）：
+	// clientTag 归一口径与服务端一致（server-go/roommanager.go 的 normalizeClientTag）。
+	// 2026-10-11 改：放开中文与空格、按"字"截到 10，不再"不匹配就整串丢空"。
 	if got := normalizeClientTag(" KAMUCL "); got != "kamucl" {
 		t.Errorf("大写/空白应归一: got %q", got)
 	}
-	if got := normalizeClientTag("非法 tag!"); got != "" {
-		t.Errorf("不匹配正则应丢弃而非报错: got %q", got)
+	if got := normalizeClientTag("非法 tag!"); got != "非法 tag" {
+		t.Errorf("中文应保留、! 应剔掉: got %q", got)
 	}
-	if got := normalizeClientTag(strings.Repeat("a", 33)); got != "" {
-		t.Errorf("超过 32 字符应丢弃: got %q", got)
+	if got := normalizeClientTag(strings.Repeat("a", 33)); got != strings.Repeat("a", 10) {
+		t.Errorf("超过 10 个字应截断: got %q", got)
 	}
-	if got := normalizeClientTag("my_launcher-2"); got != "my_launcher-2" {
-		t.Errorf("合法值应保留: got %q", got)
+	if got := normalizeClientTag("my_launcher-2"); got != "my_launche" {
+		t.Errorf("13 个字应截到 10 个: got %q", got)
 	}
 	if got := normalizeClientTag(""); got != "" {
 		t.Errorf("默认空值应保持空: got %q", got)

@@ -44,13 +44,13 @@ var (
 	joinerSwapMu sync.Mutex
 	// joinerSwapWake 是 Java JOINER_SWAP_LOCK.notifyAll() 的通道形态：
 	// 持锁时 close 旧通道并换新（joinerSwapNotifyAllLocked），等待方 select 它 + 超时。
-	joinerSwapWake      = make(chan struct{})
-	joinerCarrier       atomic.Pointer[rudpConn] // PB:917 volatile joinerCarrier
-	joinerPumpPaused    atomic.Bool              // PB:918 volatile joinerPumpPaused
-	joinerSessionAlive  atomic.Bool              // PB:921 volatile joinerSessionAlive
-	joinerServer        net.Listener             // PB joinerServer（Go 代理：guest 本地桥监听；joinerSwapMu 守护）
-	joinerPort          = -1                     // PB:887 joinerPort（Java 初值 -1）
-	joinerDownlinkSeen  atomic.Bool              // PB:924 joinerDownlinkSeen
+	joinerSwapWake     = make(chan struct{})
+	joinerCarrier      atomic.Pointer[rudpConn] // PB:917 volatile joinerCarrier
+	joinerPumpPaused   atomic.Bool              // PB:918 volatile joinerPumpPaused
+	joinerSessionAlive atomic.Bool              // PB:921 volatile joinerSessionAlive
+	joinerServer       net.Listener             // PB joinerServer（Go 代理：guest 本地桥监听；joinerSwapMu 守护）
+	joinerPort         = -1                     // PB:887 joinerPort（Java 初值 -1）
+	joinerDownlinkSeen atomic.Bool              // PB:924 joinerDownlinkSeen
 	// joinerBridgeRef 当前登记为"模组那个静态 joiner 桥"的 tcpBridge（joinerSwapMu 守护）。
 	// Java 全进程只有一条静态桥；app 允许新旧 guest 桥短暂并存（打洞/TURN/中继竞速），
 	// 泵据此判断自己是否还受热切纪律管辖（见 currentCarrierLocked）。
@@ -59,10 +59,10 @@ var (
 
 // 排干/暂停预算（毫秒，逐条照抄 PB:1022-1040、PB:1185/1269、PB:1247/1272）
 const (
-	joinerSwapDrainPhase2Ms = 3000 // PB:1022 ackDeadline
-	joinerSwapDrainPollMs   = 20   // PB:1025 Thread.sleep(20L) / PB:1040 wait(20L)
-	joinerSwapDrainPhase3Ms = 1000 // PB:1037 ackDeadline2
-	joinerPumpWaitMs        = 200  // PB:1247/1272 JOINER_SWAP_LOCK.wait(200L)
+	joinerSwapDrainPhase2Ms = 3000  // PB:1022 ackDeadline
+	joinerSwapDrainPollMs   = 20    // PB:1025 Thread.sleep(20L) / PB:1040 wait(20L)
+	joinerSwapDrainPhase3Ms = 1000  // PB:1037 ackDeadline2
+	joinerPumpWaitMs        = 200   // PB:1247/1272 JOINER_SWAP_LOCK.wait(200L)
 	joinerSwapDeadWaitMs    = 15000 // PB:1185/1269 载具死亡等新载具上限
 )
 
@@ -90,9 +90,9 @@ func joinerBridgeLog(level, msg string) {
 
 // markJoinerDownlink / hasJoinerDownlink / resetJoinerDownlink（PB:926-936）：
 // 下行首包标志——中继"真连接验证"用，服务器经中继回包到达即算该道活。
-func markJoinerDownlink()   { joinerDownlinkSeen.Store(true) }
+func markJoinerDownlink()     { joinerDownlinkSeen.Store(true) }
 func hasJoinerDownlink() bool { return joinerDownlinkSeen.Load() }
-func resetJoinerDownlink()  { joinerDownlinkSeen.Store(false) }
+func resetJoinerDownlink()    { joinerDownlinkSeen.Store(false) }
 
 // ===== 连接期上行日志（PB:938-990，中继换道重放用） =====
 // 从 MC 客户端读出的每一个字节都记账，直到"真连接验证"通过（下行首包/进世界）。
@@ -416,8 +416,8 @@ type tcpBridge struct {
 	lastAct  atomic.Int64
 	stopOnce sync.Once
 	stopCh   chan struct{}
-	downCb   func() // MC 侧连接断开（pump 退出）时回调
-	joiner   bool   // joiner 侧桥（模组 acceptUdpJoinerConnections 形态）：载具热切纪律生效
+	downCb   func()      // MC 侧连接断开（pump 退出）时回调
+	joiner   bool        // joiner 侧桥（模组 acceptUdpJoinerConnections 形态）：载具热切纪律生效
 	ownCar   *rudpConn   // joiner 泵自己绑定的承载（被更新桥取代后回落到它，见 currentCarrierLocked）
 	pumpLive atomic.Bool // joiner 泵在跑（MC 会话进行中）：载具死亡交还给泵的 15s 换道等待窗（PB:1185/1269）
 }
@@ -488,7 +488,7 @@ func startGuestBridge(rc *rudpConn, downCb func()) (string, *tcpBridge, error) {
 			conn, err := ln.Accept()
 			if err != nil {
 				unregisterJoinerBridge(b, ln) // PB:1142-1146：监听收尾摘除登记
-				return // 监听关闭（桥停止）
+				return                        // 监听关闭（桥停止）
 			}
 			if tc, ok := conn.(*net.TCPConn); ok {
 				_ = tc.SetNoDelay(true) // MC 握手字节必须立刻进隧道
@@ -771,7 +771,7 @@ func (b *tcpBridge) joinerWrite(p []byte, stop <-chan struct{}) bool {
 func (b *tcpBridge) joinerDownlink(mcConn net.Conn, stop <-chan struct{}) {
 	buf := make([]byte, bridgeBufSize)
 	carrierDeadSince := int64(0) // PB:1156
-	for !joinerStopped(stop) { // PB:1158 while (running.get() && !mcSocket.isClosed())
+	for !joinerStopped(stop) {   // PB:1158 while (running.get() && !mcSocket.isClosed())
 		t := b.currentCarrier() // PB:1159：每轮取当前载具（热切后续搬新道；被取代的旧桥回落自身承载）
 		if t == nil {
 			if !joinerSleepOrStop(stop, 50*time.Millisecond) { // PB:1160-1167 sleep(50L)

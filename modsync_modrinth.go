@@ -52,8 +52,8 @@ const (
 	modrinthMirrorAPI    = "https://mod.mcimirror.top/modrinth"
 	modrinthMirrorPrefix = "https://mod.mcimirror.top"
 
-	modrinthMirrorTimeout = 8 * time.Second  // ModrinthClient.java:37
-	modrinthTimeout       = 20 * time.Second // :40
+	modrinthMirrorTimeout  = 8 * time.Second  // ModrinthClient.java:37
+	modrinthTimeout        = 20 * time.Second // :40
 	modrinthConnectTimeout = 10 * time.Second // :70
 	modrinthHeaderTimeout  = 15 * time.Second // :42（15000ms）
 

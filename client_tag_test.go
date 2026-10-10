@@ -1,0 +1,104 @@
+package main
+
+// 客户端标签（服务端后台"标签"行显示的那段）：模组侧显示的是 forge/neoforge 这类加载器名，
+// 应用侧过去固定显示"APP"。现在 CLI 建房可以带 --client-tag 自定义，供启动器开发者对齐标识；
+// UI 不暴露这个入参（界面面向玩家）。长度上限 10 个字，中文一字算一个。
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestSanitizeClientTag(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"   ", "", false},
+		{"PCL2", "pcl2", false},                       // 大小写归一，与服务端 roommanager 同口径
+		{"My Launch", "my launch", false},             // 空格保留（"My Launcher" 是 11 个字，超上限要拒）
+		{"a   b", "a b", false},                       // 连续空格压成一个
+		{"星光启动器", "星光启动器", false},                     // 中文放行（旧规则会整串丢空）
+		{"pcl2_beta", "pcl2_beta", false},             // 下划线/连字符（11 字的 "pcl2_beta-x" 会被拒）
+		{"1234567890", "1234567890", false},           // 恰好 10 个
+		{"12345678901", "", true},                     // 11 个 → 报错
+		{"一二三四五六七八九十点", "", true},                     // 中文也按字计数
+		{`bad<script>"'`, "badscript", false},         // 尖括号/引号被剔，剩下的仍可用
+		{"\u001b[31mred\u001b[0m", "31mred0m", false}, // ANSI 控制序列：转义符与方括号被剔，字面字母留着
+		{"❤️love", "love", false},                     // 心形不是汉字，剔掉
+		{"<>\"'&", "", false},                         // 全被剔 → 清洗后空
+		{"  KamuCL  ", "kamucl", false},               // 只 trim 首尾 + 转小写，中间不动
+	}
+	for _, c := range cases {
+		got, err := sanitizeClientTag(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("sanitizeClientTag(%q) 应报错，得到 %q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("sanitizeClientTag(%q) 不该报错：%v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("sanitizeClientTag(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// normalizeClientTag 是"静默丢弃"版：磁盘上被人手改坏的设置不能报错，只能当没配。
+// normalizeClientTag 是"静默"版：磁盘上被人手改过的设置值不能报错，
+// 与服务端同口径地清洗 + 截到 10 个字（截短了仍是有效标识，比整个不上报好）。
+func TestNormalizeClientTagTruncatesInsteadOfDropping(t *testing.T) {
+	if got := normalizeClientTag("一二三四五六七八九十点"); got != "一二三四五六七八九十" {
+		t.Errorf("超长应截断到 10 个字，得 %q", got)
+	}
+	if got := normalizeClientTag("pcl2"); got != "pcl2" {
+		t.Errorf("合法值不该变：%q", got)
+	}
+	if got := normalizeClientTag(`脏<标签>"`); got != "脏标签" {
+		t.Errorf("非法字符应逐个剔掉而不是连坐丢弃，得 %q", got)
+	}
+}
+
+// CreateRoom 的标签校验发生在网络动作之前：超长必须当场拒绝，
+// 而不是把房建起来却悄悄少一个字段。
+func TestCreateRoomRejectsOverlongClientTag(t *testing.T) {
+	a := NewApp()
+	a.settingsPath = t.TempDir() + "/settings.json"
+	out := a.CreateRoom(`{"name":"t","hostPort":25565,"clientTag":"一二三四五六七八九十点"}`)
+	if !strings.Contains(out, "INVALID_PARAMS") {
+		t.Fatalf("超长标签应当场报错，实际：%s", out)
+	}
+	if !strings.Contains(out, "10") {
+		t.Fatalf("报错文案要说清上限是几个字：%s", out)
+	}
+}
+
+// 设置写回同样报错（面向开发者的入口不能静默丢），且报错时不能留下半套设置。
+func TestSaveSettingsRejectsOverlongClientTag(t *testing.T) {
+	dir := t.TempDir()
+	a := NewApp()
+	a.settingsPath = dir + "/settings.json"
+	a.settings.Theme = "dark"
+
+	out := a.SaveSettings(`{"theme":"light","clientTag":"一二三四五六七八九十点"}`)
+	if !strings.Contains(out, "INVALID_PARAMS") {
+		t.Fatalf("应报错：%s", out)
+	}
+	if a.settings.Theme != "dark" {
+		t.Errorf("报错的那次保存不该改到 theme（半套设置）：%q", a.settings.Theme)
+	}
+
+	// 中文标签入库并读回
+	out = a.SaveSettings(`{"clientTag":"星光启动器"}`)
+	if !strings.Contains(out, "星光启动器") {
+		t.Fatalf("中文标签应被接受：%s", out)
+	}
+	if a.clientTagOf() != "星光启动器" {
+		t.Errorf("持久值 = %q", a.clientTagOf())
+	}
+}

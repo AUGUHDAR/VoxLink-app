@@ -55,10 +55,10 @@ type modSyncInstance struct {
 // joinRequiredModsCheck 默认 true（VoxLinkConfig.java:48,97），
 // hostModSyncPublish 默认 true（VoxLinkConfig.java:50,98）。
 type modSyncSettings struct {
-	Instances         []modSyncInstance `json:"instances"`
-	ActiveInstance    string            `json:"activeInstance"`
-	JoinRequiredMods  bool              `json:"joinRequiredModsCheck"`
-	HostModSyncPublish bool             `json:"hostModSyncPublish"`
+	Instances          []modSyncInstance `json:"instances"`
+	ActiveInstance     string            `json:"activeInstance"`
+	JoinRequiredMods   bool              `json:"joinRequiredModsCheck"`
+	HostModSyncPublish bool              `json:"hostModSyncPublish"`
 }
 
 func defaultModSyncSettings() modSyncSettings {
@@ -343,7 +343,7 @@ func modSyncDefaultModsDirCandidates() []string {
 // 复刻同一语义：串行执行、不丢任务、不阻塞提交方。
 type modSyncTaskQueue struct {
 	mu     sync.Mutex
-	cond      chan struct{}
+	cond   chan struct{}
 	tasks  []func()
 	closed bool
 }

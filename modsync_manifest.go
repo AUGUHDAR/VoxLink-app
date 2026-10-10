@@ -32,10 +32,10 @@ import (
 )
 
 const (
-	modSyncMaxDepDepth    = 8                  // ModSyncManifestService.java:40
-	modSyncUnknownModsCap = 192                // ModSyncManifestService.java:42
-	modSyncAnswerTimeout  = 20 * time.Second   // ModSyncManifestService.java:94
-	modSyncPushTimeout    = 20 * time.Second   // 主动推送沿用同一预算
+	modSyncMaxDepDepth    = 8                // ModSyncManifestService.java:40
+	modSyncUnknownModsCap = 192              // ModSyncManifestService.java:42
+	modSyncAnswerTimeout  = 20 * time.Second // ModSyncManifestService.java:94
+	modSyncPushTimeout    = 20 * time.Second // 主动推送沿用同一预算
 )
 
 // ---- 数据结构（Java 用 JsonObject，这里用等价 struct/map） ----
