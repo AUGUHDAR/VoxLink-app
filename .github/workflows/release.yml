@@ -129,10 +129,13 @@ jobs:
           CGO_LDFLAGS: ${{ matrix.goos == 'darwin' && '-framework UniformTypeIdentifiers' || '' }}
         run: |
           go version
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            EXT=".exe"; GUIFLAG="-H windowsgui"
-          else
-            EXT=""; GUIFLAG=""
+          # 后缀与 GUI 子系统标志都按"目标平台"判，不按 runner 判：
+          # CLI 的 windows 产物是在 ubuntu runner 上交叉编译出来的，用 RUNNER_OS 判会
+          # 产出一个没有 .exe 的 Windows 可执行文件（启动器和玩家都没法双击/识别）。
+          EXT=""; GUIFLAG=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          if [ "${{ matrix.goos }}" = "windows" ] && [ "${{ matrix.variant }}" = "ui" ]; then
+            GUIFLAG="-H windowsgui"   # CLI 反过来：它要留着控制台，启动器按 stdout 读事件
           fi
           OUT="dist/VoxLink-${{ matrix.variant == 'ui' && 'UI' || 'CLI' }}-${{ matrix.goos }}-${{ matrix.goarch }}$EXT"
           mkdir -p dist
@@ -166,7 +169,7 @@ jobs:
             echo "UPX=已压缩（--best --lzma）" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "UPX 不适用该平台，重建一份未压缩的"
-            go build -trimpath -tags cli -ldflags "-s -w" -o "$ARTIFACT" .
+            go build -trimpath -tags cli -ldflags "-s -w" -o "$ARTIFACT" .  # CLI 一律不带 windowsgui
             echo "UPX=未压缩（UPX 不支持该平台/格式）" >> "$GITHUB_STEP_SUMMARY"
           fi
           ls -la "$ARTIFACT"
