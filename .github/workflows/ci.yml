@@ -11,6 +11,11 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+  issues: write   # 失败时把日志尾巴开成 issue：Actions 日志要 admin 权限才能下载，
+                  # 仓库方（我）拿不到，只能靠这一步自曝。
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -23,21 +28,50 @@ jobs:
           cache: true
 
       - name: go vet（untagged 兜底入口）
-        run: go vet .
+        shell: bash
+        run: go vet . 2>&1 | tee /tmp/vet-untagged.log
 
       - name: go vet（-tags cli）
-        run: go vet -tags cli .
+        shell: bash
+        run: go vet -tags cli . 2>&1 | tee /tmp/vet-cli.log
 
       - name: 单测（untagged）
-        run: go test -count=1 -timeout 240s .
+        shell: bash
+        run: go test -count=1 -timeout 240s . 2>&1 | tee /tmp/test-untagged.log
 
       - name: 单测（-tags cli）
-        run: go test -count=1 -timeout 240s -tags cli .
+        shell: bash
+        run: go test -count=1 -timeout 240s -tags cli . 2>&1 | tee /tmp/test-cli.log
 
       - name: CLI 三平台交叉编译
+        shell: bash
         run: |
           for t in windows/amd64 linux/amd64 linux/arm64 darwin/arm64; do
             os=${t%/*}; arch=${t#*/}
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -tags cli -ldflags "-s -w" -o /tmp/probe-$os-$arch .
             echo "  ok $os/$arch"
           done
+
+      # 任一环节挂了就把日志尾巴写成 issue（含失败用例名，便于定位平台差异）
+      - name: 失败自曝
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## CI 失败日志尾巴（commit ${GITHUB_SHA:0:7}）"
+            echo
+            for f in /tmp/vet-untagged.log /tmp/vet-cli.log /tmp/test-untagged.log /tmp/test-cli.log; do
+              [ -f "$f" ] || continue
+              echo "### $f"
+              echo '```'
+              tail -40 "$f"
+              echo '```'
+            done
+            echo
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > /tmp/report.md
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "ci: ${GITHUB_SHA:0:7} 在 linux 上失败" \
+            --body-file /tmp/report.md || true
+
