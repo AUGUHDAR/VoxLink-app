@@ -59,15 +59,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo "## CI 失败日志尾巴（commit ${GITHUB_SHA:0:7}）"
+            echo "## CI 失败摘要（commit ${GITHUB_SHA:0:7}）"
             echo
             for f in /tmp/vet-untagged.log /tmp/vet-cli.log /tmp/test-untagged.log /tmp/test-cli.log; do
               [ -f "$f" ] || continue
+              hits=$(grep -E "^(--- FAIL|--- PASS|FAIL|panic:|ok  )|^vet\.exe:|\.go:[0-9]+:[0-9]+:" "$f" | head -40)
+              [ -n "$hits" ] || continue
               echo "### $f"
               echo '```'
-              tail -40 "$f"
+              echo "$hits"
               echo '```'
             done
+            echo
+            echo "### 最后 30 行原文（上面没抓到东西时看这里）"
+            echo '```'
+            tail -30 /tmp/test-untagged.log /tmp/test-cli.log 2>/dev/null || true
+            echo '```'
             echo
             echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > /tmp/report.md
