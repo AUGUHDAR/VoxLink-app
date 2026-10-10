@@ -1414,8 +1414,11 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 			}
 		}
 	}
+	// peer 的这两个字段会被信令分发协程（hostOnPunchInfo）读，必须与它同一把锁。
+	e.mu.Lock()
 	peer.hostMapped = hostMapped
 	peer.hostDelta = hostDelta
+	e.mu.Unlock()
 
 	// RTT 齐射同步：host 墙钟 + 3000（模组 RoomManager 同款）
 	offer["punchSyncTimeMs"] = time.Now().Add(3 * time.Second).UnixMilli()
@@ -1500,12 +1503,13 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 		}
 		e.mu.Lock()
 		cur := e.hPeers[peer.id]
+		won := peer.rudp != nil
+		mapped := peer.mapped
 		e.mu.Unlock()
-		if cur != peer || peer.rudp != nil {
+		if cur != peer || won {
 			_ = sock.Close()
 			return
 		}
-		mapped := peer.mapped
 		if mapped == nil {
 			_ = sock.Close()
 			return
@@ -1647,6 +1651,8 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 	port := sigInt(data, "joinerMappedPort")
 	e.mu.Lock()
 	peer := e.hPeers[from]
+	var hm *stunMappedAddr
+	var hd int
 	if peer != nil {
 		if ip != "" && port > 0 {
 			peer.mapped = &stunMappedAddr{IP: ip, Port: port}
@@ -1663,6 +1669,8 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 		if r := sigInt(data, "joinerMappedPortRange"); r > 0 {
 			peer.joinerPortRange = r
 		}
+		// 我方映射是本 goroutine 之外写入的，必须在这把锁里取快照
+		hm, hd = peer.hostMapped, peer.hostDelta
 	}
 	e.mu.Unlock()
 	if peer == nil {
@@ -1671,12 +1679,12 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 
 	// 回 holepunch_mapped（对齐模组字段：hostMappedIp/hostMappedPort/hostMappedPorts）
 	mappedData := map[string]any{}
-	if peer.hostMapped != nil {
-		mappedData["hostMappedIp"] = peer.hostMapped.IP
-		mappedData["hostMappedPort"] = peer.hostMapped.Port
-		mappedData["hostMappedPorts"] = []int{peer.hostMapped.Port}
-		if peer.hostDelta != 0 {
-			mappedData["hostMappedPortDelta"] = peer.hostDelta
+	if hm != nil {
+		mappedData["hostMappedIp"] = hm.IP
+		mappedData["hostMappedPort"] = hm.Port
+		mappedData["hostMappedPorts"] = []int{hm.Port}
+		if hd != 0 {
+			mappedData["hostMappedPortDelta"] = hd
 		}
 	}
 	if lip := getLocalIP(); lip != "" {

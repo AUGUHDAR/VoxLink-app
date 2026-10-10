@@ -3,7 +3,7 @@ package main
 // stun.go — RFC5389 STUN Binding 的最小实现，字节格式与模组 StunProbe.java 一致：
 // 请求 20B：00 01 00 00 + magic cookie(21 12 A4 42) + 随机 12B txid（SOFTWARE 留空）。
 // 响应解析 XOR-MAPPED-ADDRESS(0x0020)/0x8020/MAPPED-ADDRESS(0x0001)，
-// 端口 XOR 0x2112、IPv4 XOR 0x2112A44D，与 StunProbe.parseBindingResponse 相同。
+// 端口 XOR 0x2112、IPv4 XOR cookie 全字（0x2112A442），与 StunProbe 的 port^8466 / ip^554869826 同值。
 
 import (
 	"crypto/rand"
@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	stunMagicCookie uint32 = 0x2112A44D
+	// stunMagicCookie 是 RFC 5389 规定的固定值 0x2112A442（模组 StunProbe.java 里的 554869826）。
+	// 这里曾经写成 0x2112A44D：请求发出去公网服务器不认（直接超时），
+	// 且解析时逐字节比对 [4:20] 会把标准响应判成事务不匹配 —— NAT 探测、打洞、中继全链路失效。
+	stunMagicCookie uint32 = 0x2112A442
 	stunReqType     uint16 = 0x0001 // Binding Request
 	stunRespType    uint16 = 0x0101 // Binding Success Response
 	stunHeaderLen          = 20

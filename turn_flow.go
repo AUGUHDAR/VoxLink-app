@@ -550,6 +550,14 @@ func (e *connEngine) hostOnStdTurnAlloc(from string, data map[string]any) {
 			return
 		}
 		peer := netUDPAddrHostPort(relayHost, relayPort)
+		if peer == nil || peer.IP == nil {
+			// 对端 relay 地址不是合法 IP 字面量时，putXorAddress 会解引用 nil IP 直接崩进程
+			// （模组 1.2.0 F12 同一处：房客一条 turn_alloc{relayHost:"evil.com"} 就能打死房主）。
+			e.app.netLog("warn", "标准 TURN host 对端 relay 地址不可解析")
+			stdTurnClose(session)
+			e.sendTurnNack(from, "std_bind_failed")
+			return
+		}
 		if !stdTurnChannelBind(session, peer, stdTurnChannel, stdTurnOpTimeoutMs) {
 			e.app.netLog("warn", "标准 TURN host ChannelBind 失败")
 			stdTurnClose(session)
@@ -667,6 +675,11 @@ func (e *connEngine) guestOnStdTurnReady(data map[string]any) {
 	// ChannelBind 同步事务离开信令分发线程
 	go func() {
 		peer := netUDPAddrHostPort(relayHost, relayPort)
+		if peer == nil || peer.IP == nil {
+			e.app.netLog("warn", "标准 TURN guest 对端 relay 地址不可解析")
+			e.teardownTurn(true)
+			return
+		}
 		if !stdTurnChannelBind(session, peer, stdTurnChannel, stdTurnOpTimeoutMs) {
 			e.app.netLog("warn", "标准 TURN guest ChannelBind 失败")
 			e.teardownTurn(true)
