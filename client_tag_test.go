@@ -5,7 +5,13 @@ package main
 // UI 不暴露这个入参（界面面向玩家）。长度上限 10 个字，中文一字算一个。
 
 import (
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -100,5 +106,73 @@ func TestSaveSettingsRejectsOverlongClientTag(t *testing.T) {
 	}
 	if a.clientTagOf() != "星光启动器" {
 		t.Errorf("持久值 = %q", a.clientTagOf())
+	}
+}
+
+// --client-tag 必须真的落到 /room/create 的请求体里：这里用 httptest 假基址
+// （绝不打生产服务器），并让建房响应直接失败——只验"发出去的那一段"，不进会话流程。
+func TestCreateRoomPutsClientTagOnTheWire(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		// 信封失败：CreateRoom 会在这里返回，后续会话/WS 都不起（测试只看到请求体）
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "TEST_STOP"})
+	}))
+	defer srv.Close()
+
+	// 端口探测要求本地真有人在听：开一个只用于占口的回环监听
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("回环监听不可用：", err)
+	}
+	defer ln.Close()
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+
+	newApp := func() *App {
+		a := NewApp()
+		a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+		a.settings.ServerURL = srv.URL
+		return a
+	}
+
+	// 1) 当次入参优先
+	a := newApp()
+	a.settings.ClientTag = "pcl2"
+	a.CreateRoom(`{"name":"t","hostPort":` + portStr + `,"clientTag":"星光启动器"}`)
+	mu.Lock()
+	got := bodies[len(bodies)-1]
+	mu.Unlock()
+	if got["clientTag"] != "星光启动器" {
+		t.Fatalf("当次 --client-tag 应覆盖持久值，请求体=%v", got["clientTag"])
+	}
+	if got["clientType"] != "app" {
+		t.Errorf("clientType 不该被标签改动：%v", got["clientType"])
+	}
+
+	// 2) 不传时回落持久值
+	a2 := newApp()
+	a2.settings.ClientTag = "pcl2"
+	a2.CreateRoom(`{"name":"t","hostPort":` + portStr + `}`)
+	mu.Lock()
+	got2 := bodies[len(bodies)-1]
+	mu.Unlock()
+	if got2["clientTag"] != "pcl2" {
+		t.Fatalf("应回落到设置里的持久值，请求体=%v", got2["clientTag"])
+	}
+
+	// 3) 两者都空则整个字段不发（不给服务端塞空串）
+	a3 := newApp()
+	a3.CreateRoom(`{"name":"t","hostPort":` + portStr + `}`)
+	mu.Lock()
+	got3 := bodies[len(bodies)-1]
+	mu.Unlock()
+	if _, ok := got3["clientTag"]; ok {
+		t.Fatalf("没有标签时不该带 clientTag 字段：%v", got3["clientTag"])
 	}
 }

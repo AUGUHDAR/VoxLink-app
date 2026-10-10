@@ -69,6 +69,15 @@ func (e *connEngine) notifyState(phase, status, address, detail string) {
 	if !alive {
 		return
 	}
+	// 日志上传的连接事件登记：模组在 ConnectionManager 的同一批位点调用
+	// （:15723 onConnected / :15077 onDisconnected）。notifyState 是本端这些位点的共同出口；
+	// onDisconnected 内部要求"曾经连上过且未上传过"，没连上时自然 no-op，所以这里无条件调。
+	switch status {
+	case statusSuccess:
+		e.app.logUploadOnConnected()
+	case statusFailed:
+		e.app.logUploadOnDisconnected()
+	}
 	e.app.emitConnState(phase, status, address, detail)
 }
 

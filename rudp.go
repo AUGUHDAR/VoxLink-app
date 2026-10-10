@@ -29,6 +29,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -554,7 +555,26 @@ func (c *rudpConn) closeSubstream(ch int) {
 
 func (c *rudpConn) closeWith(reason string) {
 	c.closeMsg.CompareAndSwap(nil, &reason)
+	// 判死四类（对端断开不算）交出去登记日志样本：模组是在 ReliableUdpTransport.java
+	// :1148（心跳连续 5 拍零入站）/:1174（60s 硬超）/:1180（24s 静默且有待确认）
+	// :1206（重传超限）四个判定点各调一次 onLinkDead，本端这四个判定都收敛到 closeWith，
+	// 所以在这一个出口按 reason 分流，语义一一对应。
+	if rudpReasonIsDead(reason) {
+		transportLinkDead(reason)
+	}
 	_ = c.Close()
+}
+
+// rudpReasonIsDead 区分"判死"与"正常关闭/对端主动断开"：只有前者要触发立即上传。
+func rudpReasonIsDead(reason string) bool {
+	switch {
+	case strings.HasPrefix(reason, "传输停滞"),
+		strings.HasPrefix(reason, "静默超60s"),
+		strings.HasPrefix(reason, "静默超24s"),
+		strings.HasPrefix(reason, "seq "):
+		return true
+	}
+	return false
 }
 
 // Close 发送 DISCONNECT 并关闭会话与底层 socket。幂等。
@@ -629,6 +649,7 @@ func (c *rudpConn) recvLoop() {
 			}
 		}
 		pkt := buf[:n]
+		transportActivity() // ReliableUdpTransport.java:599：收到对端包即记活跃（内部 1s 节流）
 		if c.codec != nil {
 			frame := c.codec.decode(pkt)
 			if frame == nil {

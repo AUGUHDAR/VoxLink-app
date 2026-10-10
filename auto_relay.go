@@ -347,11 +347,15 @@ func (e *connEngine) autoRelayFailoverOrEnd(reasonKey, reasonText string) {
 		failText = "多次尝试都没连上 :("
 	}
 	if !canRevive || offer == nil {
+		// 终局失败：模组的 onTerminalFailure 位点（CM:13576 showConnectFailedFinal /
+		// :15438 declareZeroRecvFinalFailure）——5s 后把这一场的日志样本传走，不再硬等 90s
+		e.app.logUploadOnTerminalFailure()
 		e.notifyState(phaseP2P, statusFailed, "", failText)
 		return
 	}
 	gen, ok := e.beginGuestCycle()
 	if !ok {
+		e.app.logUploadOnTerminalFailure()
 		e.notifyState(phaseP2P, statusFailed, "", failText)
 		return
 	}

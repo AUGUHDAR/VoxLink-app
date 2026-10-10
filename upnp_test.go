@@ -504,8 +504,10 @@ func TestSeqSchedulerSerialAndCancel(t *testing.T) {
 		}
 	}
 done2:
-	if n > 0 {
-		t.Errorf("cancel(false) 之后不应再有新的执行，实收 %d 次", n)
+	// cancel(false) 的语义是"不再排下一次"，但**不打断已经在跑的那一次**
+	// （ScheduledFuture.cancel(false) 同语义）。所以容忍 1 次在途执行，只不许继续排。
+	if n > 1 {
+		t.Errorf("cancel(false) 之后不应继续排期，实收 %d 次", n)
 	}
 
 	// stopped 后 schedule 返回 0（等价被拒绝）

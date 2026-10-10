@@ -155,6 +155,7 @@ func (a *App) Shutdown() {
 		s.stop()
 		a.engine.unbindSession(s)
 	}
+	upnpStop() // UPnPManager.stop()：停续租调度器并清空登记表（模组在客户端卸载时同调用）
 }
 
 // ---- 事件辅助 ----
@@ -306,6 +307,10 @@ func (a *App) leaveInternal() {
 	a.mu.Lock()
 	s := a.session
 	code, token, isHost := a.code, a.token, a.isHost
+	hostPort := 0
+	if a.room != nil {
+		hostPort = roomInt(a.room, "hostPort")
+	}
 	a.mu.Unlock()
 
 	if s != nil {
@@ -325,6 +330,7 @@ func (a *App) leaveInternal() {
 		}, nil)
 	}
 	a.setState("idle", "", "", false, nil, nil)
+	a.sessionStopped(isHost, hostPort) // RoomManager.java:556 + AttemptingJoinScreen.java:249
 }
 
 // clearSession 由会话 goroutine 在结束时调用，重置 App 状态（仅当仍是本会话）。
@@ -429,6 +435,7 @@ func (a *App) GetSettings() string {
 		"version":      appVersion,
 		"clientTag":    clientTag,
 		"relayEnabled": a.relayEnabled(),
+		"autoUPnP":     a.autoUPnPEnabled(),
 	})
 }
 
@@ -441,6 +448,7 @@ func (a *App) SaveSettings(settingsJSON string) string {
 		Theme        string  `json:"theme"`
 		ClientTag    *string `json:"clientTag"`
 		RelayEnabled *bool   `json:"relayEnabled"`
+		AutoUPnP     *bool   `json:"autoUPnP"`
 	}
 	if err := parseParams(settingsJSON, &req); err != nil {
 		return wrapErr("INVALID_PARAMS", err.Error())
@@ -465,6 +473,9 @@ func (a *App) SaveSettings(settingsJSON string) string {
 	}
 	if req.RelayEnabled != nil {
 		a.settings.RelayEnabled = req.RelayEnabled
+	}
+	if req.AutoUPnP != nil {
+		a.settings.AutoUPnP = req.AutoUPnP
 	}
 	a.mu.Unlock()
 
@@ -640,8 +651,11 @@ func (a *App) CreateRoom(reqJSON string) string {
 			fmt.Sprintf("端口 %d 没有服务在监听，请先在 MC 开好局域网或启动服务端", req.HostPort))
 	}
 
-	// natType 用 STUN 探测结果（拿不到 "unknown"）
-	natType := quickNatType()
+	// natType 建房请求里先按 "unknown" 发（模组同样是 instant create + NAT probe deferred，
+	// RoomManager.java:161-162：探测放后台，探到再 updateRoom）。
+	// 本端此前在这里同步跑 quickNatType()，最坏会阻塞建房两秒多——现在交给
+	// hostSessionStarted 的后台探测（session_wiring.go），与模组同一时序。
+	natType := "unknown"
 
 	body := map[string]any{
 		"name":                  req.Name,
@@ -704,7 +718,8 @@ func (a *App) CreateRoom(reqJSON string) string {
 		a.startFedTunnelForRoom(room, req.HostPort)
 	}
 	a.startSession(data.Code, data.HostToken, true, room, "")
-	a.modSyncOnRoomCreated() // 建房成功后立即后台构建两档清单（ModSyncManifestService 的 onRoomCreated）
+	a.modSyncOnRoomCreated()                                // 建房成功后立即后台构建两档清单（ModSyncManifestService 的 onRoomCreated）
+	a.hostSessionStarted(data.Code, req.Name, req.HostPort) // 模组同位置：UPnP 映射 + STUN 精探 + 日志样本登记
 
 	return wrapOK(map[string]any{
 		"code":      data.Code,
@@ -804,6 +819,7 @@ func (a *App) JoinRoom(reqJSON string) string {
 	// 新一轮加入：代数 +1（模组 startVoxLinkP2P 的 joinAttemptGeneration.incrementAndGet()，
 	// ConnectionManager.java:14892）。leaveInternal 同样 bump，令旧链放弃。
 	gen := a.joinAttemptGeneration.Add(1)
+	a.guestSessionStarted(req.Code) // AttemptingJoinScreen.java:258（界面一开就 arm，失败样本才完整）
 
 	body := map[string]any{
 		"code":                  req.Code,

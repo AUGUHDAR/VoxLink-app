@@ -22,6 +22,9 @@ type appSettings struct {
 	// connection.relay_unavailable 直接退出，CM:10520-10526），它不管 TURN（fireAutoTurn 无此判，CM:12830-12837）。
 	// 用 *bool 是为了区分"老配置文件没这一项"（nil→按默认 true）与用户显式关掉。
 	RelayEnabled *bool `json:"relayEnabled"`
+	// AutoUPnP 与模组 VoxLinkConfig.autoUPnP 同一个开关、同一个默认值 true（VoxLinkConfig.java:35/58/86）。
+	// 房主建房时是否向路由器请求端口映射（RoomManager.java:166 的那道 if）。
+	AutoUPnP *bool `json:"autoUPnP"`
 }
 
 func defaultSettings() appSettings {
