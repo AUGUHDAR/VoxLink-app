@@ -98,7 +98,11 @@ jobs:
         if: matrix.variant == 'ui' && matrix.goos == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+          # wails v2 的 linux 前端是 CGO 实现：缺任何一项都会以
+          # "undefined: Frontend" 的形式炸掉（那是 cgo 文件被排除的症状，不是我们代码的问题）
+          sudo apt-get install -y build-essential gcc pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+          pkg-config --modversion webkit2gtk-4.1
+          go env CC CGO_ENABLED
 
       - name: 构建
         env:

@@ -1,5 +1,8 @@
-# 每次推送的最小验证：三个构建组合都能编译 + 单测 + CLI 三平台交叉编译。
-# 不发产物（发产物在 release.yml），目的是让"改一个常量就把某一版编译搞挂"当天就红。
+# 每次推送的最小验证：CLI 版（纯 Go）三平台交叉编译 + 单测。
+#
+# 刻意不在这里验 UI 版：UI 要 CGO + 各平台 GTK/WebKit/macOS SDK，
+# 在 ubuntu runner 上"能不能编"取决于 runner 的 CGO 环境，与"代码对不对"混在一起看不清。
+# UI 版的真实构建与验证放在 release.yml（每个平台用自己的 runner）。
 
 name: ci
 
@@ -19,21 +22,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: 装 Linux 的 UI 依赖（只为编译 desktop 标签这一版，UI 版无头环境能编译不能运行）
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+      - name: go vet（untagged 兜底入口）
+        run: go vet .
 
-      - name: go vet（三种标签组合）
-        run: |
-          go vet .
-          go vet -tags cli .
-          go vet -tags "desktop,production" .
+      - name: go vet（-tags cli）
+        run: go vet -tags cli .
 
-      - name: 单测（untagged 与 -tags cli）
-        run: |
-          go test -count=1 .
-          go test -count=1 -tags cli .
+      - name: 单测（untagged）
+        run: go test -count=1 -timeout 240s .
+
+      - name: 单测（-tags cli）
+        run: go test -count=1 -timeout 240s -tags cli .
 
       - name: CLI 三平台交叉编译
         run: |
