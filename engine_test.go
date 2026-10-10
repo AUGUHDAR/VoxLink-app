@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1337,7 +1338,19 @@ func TestParsePowerShellJavaCSV(t *testing.T) {
 
 // ---- DetectMcPorts 真实环境 ----
 
+// requireWindowsMCPorts mc_ports.go 的进程/端口枚举目前是 Windows 实现
+// （wmic → powershell 兜底 + netstat -ano -p TCP）。Linux/macOS 的等价实现还没做
+// （任务：三平台产物那一轮补 ss/lsof//proc 与 macOS lsof 变体），
+// 所以这三个"跑真实命令"的用例在非 Windows 上必须跳过——不是断言写错，是被测对象在该平台不存在。
+func requireWindowsMCPorts(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skipf("mc_ports 枚举目前是 Windows 实现，%s/%s 上跳过", runtime.GOOS, runtime.GOARCH)
+	}
+}
+
 func TestDetectMcPortsLive(t *testing.T) {
+	requireWindowsMCPorts(t)
 	if testing.Short() {
 		t.Skip("short 模式跳过真实命令执行")
 	}
@@ -1376,6 +1389,7 @@ func TestDetectMcPortsLive(t *testing.T) {
 
 // TestDetectMcPortsBinding 绑定方法返回契约格式 {ok,data:{ports:[...]}}，且无 name 字段。
 func TestDetectMcPortsBinding(t *testing.T) {
+	requireWindowsMCPorts(t)
 	if testing.Short() {
 		t.Skip("short 模式跳过真实命令执行")
 	}
@@ -1404,6 +1418,7 @@ func TestDetectMcPortsBinding(t *testing.T) {
 // ---- netstat 真实输出交叉验证（解析器 vs 原始输出行数）----
 
 func TestParseNetstatAgainstRealOutput(t *testing.T) {
+	requireWindowsMCPorts(t)
 	if testing.Short() {
 		t.Skip("short 模式跳过真实命令执行")
 	}

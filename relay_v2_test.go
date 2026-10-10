@@ -84,6 +84,12 @@ func (s *testStream) readQueue() []byte {
 	return all
 }
 
+func (s *testStream) closeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closes
+}
+
 func (s *testStream) leg() *relayLeg {
 	return relayLegOf(&bridgeStream{
 		in:     s.in,
@@ -125,10 +131,27 @@ func TestRelayBridgeV2ForwardsBothDirections(t *testing.T) {
 	if _, err := legB.out([]byte("login")); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 2*time.Second, func() bool {
-		return bytes.Contains(legB.readQueue(), []byte("handshake")) &&
-			bytes.Contains(legA.readQueue(), []byte("login"))
-	}, "双向字节未搬运")
+	// 首轮搬运单独等，超时就把"泵到底跑没跑"的证据打出来：
+	// 这条用例在 linux runner 上红过一次，只有一句 timeout 的话谁也定位不了（Windows 本机复现不出）。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if bytes.Contains(legB.readQueue(), []byte("handshake")) &&
+			bytes.Contains(legA.readQueue(), []byte("login")) {
+			break
+		}
+		if time.Now().After(deadline) {
+			b.mu.Lock()
+			sessions := len(b.active)
+			var fwd bool
+			if sess := b.active["muxrelay-1-guest-9"]; sess != nil {
+				fwd = sess.forwarding.Load()
+			}
+			b.mu.Unlock()
+			t.Fatalf("timeout: 双向字节未搬运; sessions=%d forwarding=%v A队列=%q B队列=%q A.closes=%d B.closes=%d",
+				sessions, fwd, legA.readQueue(), legB.readQueue(), legA.closeCount(), legB.closeCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	// A 方向 EOF → 整个会话收尾，两条腿都被关一次
 	legA.sendEOF()
