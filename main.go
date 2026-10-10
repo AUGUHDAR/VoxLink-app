@@ -1,4 +1,9 @@
+//go:build desktop
+
 package main
+
+// main.go — UI 版入口（go build -tags desktop,production）。
+// 前端资源只在这里 embed：CLI 版不编译本文件，因此产物里不含 HTML/JS 与 webview。
 
 import (
 	"embed"

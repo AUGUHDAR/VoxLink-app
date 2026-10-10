@@ -1,24 +1,22 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const (
 	appVersion       = "1.1.9-beta"
 	defaultServerURL = "https://p2p.wuhui.icu"
+	// clientProtocolVersion 上报给服务端的客户端协议号（模组 VoxLinkConstants.PROTOCOL_VERSION 同义）。
+	clientProtocolVersion = 7
 )
 
 // appCapabilities 本端协议能力（与模组 ProtocolNegotiator.CURRENT_CAPABILITIES 对齐，
@@ -29,9 +27,11 @@ const (
 //   - stdTurnV1：TURN 中继走标准 RFC 5766（否则自动回落自定义协议 v1）
 var appCapabilities = []string{"relay", "ice_restart", "continuous_retry", "punchAuthV1", "stdTurnV1"}
 
-// App 是绑定给前端的 Wails 结构体，持有全部会话状态。
+// App 是会话状态与流程层的持有者：UI 版把它 Bind 给前端，CLI 版直接调同一批方法。
+// 界面相关的一切（事件推送、文件对话框）都走 sink / picker 两个接口注入，见 events.go。
 type App struct {
-	ctx          context.Context
+	sink         eventSink
+	picker       filePicker
 	api          *apiClient
 	settingsPath string
 	settings     appSettings
@@ -50,6 +50,7 @@ type App struct {
 func NewApp() *App {
 	a := &App{
 		api:      newAPIClient(),
+		sink:     nullSink{},
 		state:    "idle",
 		settings: defaultSettings(),
 	}
@@ -58,14 +59,13 @@ func NewApp() *App {
 	return a
 }
 
-// startup 由 Wails 在启动时调用。
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+// Init 加载持久化设置，由 UI 版 startup 或 CLI 版入口在拿到 sink 之后调用。
+func (a *App) Init() {
 	a.loadSettings()
 }
 
-// shutdown 停掉会话（不保证 leave 成功）。
-func (a *App) shutdown(ctx context.Context) {
+// Shutdown 停掉当前会话（不保证 leave 成功）。
+func (a *App) Shutdown() {
 	a.mu.Lock()
 	s := a.session
 	a.mu.Unlock()
@@ -77,12 +77,23 @@ func (a *App) shutdown(ctx context.Context) {
 
 // ---- 事件辅助 ----
 
-// emit 安全地发 Wails 事件（ctx 为 nil 时静默跳过，便于测试）。
+// emit 把事件交给当前 sink（未注入时静默丢弃，便于测试与无头调用）。
 func (a *App) emit(event string, data any) {
-	if a.ctx == nil {
+	a.mu.Lock()
+	sink := a.sink
+	a.mu.Unlock()
+	if sink == nil {
 		return
 	}
-	runtime.EventsEmit(a.ctx, event, data)
+	sink.Emit(event, data)
+}
+
+// AttachSink 由入口层注入事件出口（UI=wails 事件，CLI=NDJSON stdout）。
+func (a *App) AttachSink(sink eventSink, picker filePicker) {
+	a.mu.Lock()
+	a.sink = sink
+	a.picker = picker
+	a.mu.Unlock()
 }
 
 // netLogSanitize 兜底消敏：去掉 IPv4、loopback 字面量、:port、IP:port 等模式。
@@ -263,7 +274,8 @@ func wrapOK(data any) string {
 }
 
 func wrapErr(code, msg string) string {
-	b, err := json.Marshal(map[string]any{"ok": false, "error": code, "message": msg})
+	// code 与 error 同值：error 是老前端在读的字段，code 是给启动器/脚本匹配的机器码。
+	b, err := json.Marshal(map[string]any{"ok": false, "error": code, "code": code, "message": msg})
 	if err != nil {
 		return `{"ok":false,"error":"INTERNAL","message":"错误序列化失败"}`
 	}
@@ -476,7 +488,7 @@ func (a *App) CreateRoom(reqJSON string) string {
 		"gameVersion":           gameVersion,
 		"loader":                loader,
 		"clientType":            "app",
-		"clientProtocolVersion": 7,
+		"clientProtocolVersion": clientProtocolVersion,
 		"clientCapabilities":    appCapabilities,
 	}
 	if req.Password != "" {
@@ -558,7 +570,7 @@ func (a *App) JoinRoom(reqJSON string) string {
 	body := map[string]any{
 		"code":                  req.Code,
 		"clientType":            "app",
-		"clientProtocolVersion": 7,
+		"clientProtocolVersion": clientProtocolVersion,
 		"clientCapabilities":    appCapabilities,
 	}
 	if req.Password != "" {
@@ -695,25 +707,6 @@ func (a *App) GetStun() string {
 		return wrapCallErr(err)
 	}
 	return wrapOK(data)
-}
-
-// OpenInBrowser 用系统默认浏览器打开 http/https 链接。
-func (a *App) OpenInBrowser(rawURL string) {
-	u := strings.TrimSpace(rawURL)
-	if !validateServerURL(u) {
-		a.netLog("warn", "拒绝打开非 http/https 链接: "+rawURL)
-		return
-	}
-	// rundll32 参数中不能直接带未转义的 URL 特殊字符问题不大，但用 cmd /c start 会吃掉 & 等字符，
-	// 因此选择 rundll32 url.dll,FileProtocolHandler。
-	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
-	if err := cmd.Start(); err != nil {
-		a.netLog("error", "打开浏览器失败: "+err.Error())
-		return
-	}
-	// Start 之后必须 Wait 回收，否则每开一次浏览器就留一个未回收的子进程句柄。
-	// rundll32 会立刻把链接交给 shell 后退出，这里异步回收不阻塞界面。
-	go func() { _ = cmd.Wait() }()
 }
 
 // ==================== 连接引擎绑定方法 ====================

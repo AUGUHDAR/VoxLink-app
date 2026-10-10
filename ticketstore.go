@@ -18,8 +18,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	wailsrt "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const (
@@ -394,14 +392,18 @@ func checkTicketFiles(files []string) (string, string) {
 }
 
 // TicketPickFiles 弹系统多选框挑附件；取消返回空列表。
+// 无图形层（CLI 版）时明确报 NO_DIALOG——附件路径由调用方直接给出，不假装成功。
 func (a *App) TicketPickFiles() string {
-	paths, err := wailsrt.OpenMultipleFilesDialog(a.ctx, wailsrt.OpenDialogOptions{
-		Title: "选择要附带的日志 / 截图",
-		Filters: []wailsrt.FileFilter{
-			{DisplayName: "日志与文本", Pattern: "*.log;*.txt;*.json;*.cfg;*.ini"},
-			{DisplayName: "图片", Pattern: "*.png;*.jpg;*.jpeg;*.webp"},
-			{DisplayName: "所有文件", Pattern: "*.*"},
-		},
+	a.mu.Lock()
+	picker := a.picker
+	a.mu.Unlock()
+	if picker == nil {
+		return wrapErr("NO_DIALOG", "当前版本没有图形对话框，请直接给出附件路径")
+	}
+	paths, err := picker.PickFiles("选择要附带的日志 / 截图", []pickFilter{
+		{Name: "日志与文本", Patterns: []string{"*.log", "*.txt", "*.json", "*.cfg", "*.ini"}},
+		{Name: "图片", Patterns: []string{"*.png", "*.jpg", "*.jpeg", "*.webp"}},
+		{Name: "所有文件", Patterns: []string{"*.*"}},
 	})
 	if err != nil {
 		return wrapErr("DIALOG", err.Error())
