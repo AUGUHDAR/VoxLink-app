@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VoxLink</title>
+  <link rel="stylesheet" href="assets/css/main.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- ===================== 侧边栏 ===================== -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <img src="assets/img/icon.png" alt="VoxLink">
+        </div>
+        <div class="brand-text">
+          <div class="brand-name">VoxLink</div>
+          <div class="brand-sub">P2P 联机助手</div>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-item nav-hide-on-session" data-page="lobby" title="浏览房间">
+          <span class="nav-ico" data-ico="home"></span><span class="nav-label">大厅</span>
+        </button>
+        <button class="nav-item nav-hide-on-session" data-page="join" title="加入房间">
+          <span class="nav-ico" data-ico="join"></span><span class="nav-label">加入房间</span>
+        </button>
+        <button class="nav-item nav-hide-on-session" data-page="create" title="创建房间">
+          <span class="nav-ico" data-ico="create"></span><span class="nav-label">创建房间</span>
+        </button>
+        <button class="nav-item nav-room hidden" data-page="room" title="当前房间">
+          <span class="nav-ico" data-ico="room"></span><span class="nav-label">当前房间</span>
+        </button>
+        <div class="nav-sep"></div>
+        <button class="nav-item" data-page="ticket" title="工单">
+          <span class="nav-ico" data-ico="ticket"></span><span class="nav-label">工单</span>
+          <span class="nav-badge hidden" id="ticket-badge">0</span>
+        </button>
+        <button class="nav-item" data-page="links" title="相关链接">
+          <span class="nav-ico" data-ico="link"></span><span class="nav-label">相关链接</span>
+        </button>
+        <button class="nav-item" data-page="settings" title="设置">
+          <span class="nav-ico" data-ico="settings"></span><span class="nav-label">设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <button class="room-pill hidden" id="room-pill" title="回到房间页">
+          <span class="room-pill-dot" aria-hidden="true"></span>
+          <span class="room-pill-code" id="room-pill-code">------</span>
+          <span class="room-pill-text">当前房间</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ===================== 内容区 ===================== -->
+    <main class="main" id="main">
+      <!-- 大厅 -->
+      <section class="page" id="page-lobby">
+        <header class="page-head">
+          <div>
+            <h1 class="page-title">大厅</h1>
+            <p class="page-desc">浏览房间，找一局一起联机 qwq</p>
+          </div>
+          <button class="btn btn-ghost" id="lobby-refresh">
+            <span class="ico" data-ico="refresh"></span>刷新
+          </button>
+        </header>
+
+        <div class="toolbar card">
+          <div class="search-box">
+            <span class="ico ico-muted" data-ico="search"></span>
+            <input type="text" id="lobby-search" placeholder="搜索房间名…" autocomplete="off">
+          </div>
+          <select class="select" id="lobby-category"><option value="">全部分类</option></select>
+          <div class="chip-group" id="lobby-loaders">
+            <button class="chip active" data-loader="">全部</button>
+            <button class="chip" data-loader="fabric">fabric</button>
+            <button class="chip" data-loader="forge">forge</button>
+            <button class="chip" data-loader="neoforge">neoforge</button>
+          </div>
+        </div>
+
+        <div class="room-grid" id="lobby-grid"></div>
+
+        <div class="empty hidden" id="lobby-empty">
+          <div class="empty-ico" aria-hidden="true">ᓚᘏᗢ</div>
+          <div class="empty-title">这里还没有房间</div>
+          <div class="empty-desc">稍后刷新一下，或者自己开一个房间吧 :D</div>
+        </div>
+
+        <div class="pager hidden" id="lobby-pager">
+          <button class="btn btn-ghost btn-sm" id="pager-prev">上一页</button>
+          <div class="pager-nums" id="pager-nums"></div>
+          <button class="btn btn-ghost btn-sm" id="pager-next">下一页</button>
+        </div>
+
+        <footer class="page-foot" id="lobby-foot">
+          <span id="lobby-ip">正在获取你的公网 IP…</span>
+        </footer>
+      </section>
+
+      <!-- 加入房间 -->
+      <section class="page" id="page-join">
+        <header class="page-head">
+          <div>
+            <h1 class="page-title">加入房间</h1>
+            <p class="page-desc">输入6位房间代码，马上进入小伙伴的房间 awa</p>
+          </div>
+        </header>
+
+        <div class="card form-card join-card">
+          <div class="join-preview hidden" id="join-preview">
+            <span class="join-preview-name" id="join-preview-name"></span>
+            <span class="pill pill-accent" id="join-preview-lock" hidden>需要密码</span>
+          </div>
+
+          <label class="field-label">房间代码</label>
+          <div class="code-inputs" id="code-inputs">
+            <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第1位">
+            <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第2位">
+            <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第3位">
+            <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第4位">
+            <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第5位">
+            <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第6位">
+          </div>
+
+          <div class="field hidden" id="join-pw-field">
+            <label class="field-label" for="join-pw">房间密码</label>
+            <input type="password" class="input" id="join-pw" placeholder="这个房间设置了密码" autocomplete="off">
+          </div>
+
+          <div class="form-error hidden" id="join-error"></div>
+
+          <button class="btn btn-primary btn-lg btn-block" id="join-btn">
+            <span class="ico" data-ico="join"></span><span>加入房间</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- 创建房间 -->
+      <section class="page" id="page-create">
+        <header class="page-head">
+          <div>
+            <h1 class="page-title">创建房间</h1>
+            <p class="page-desc">开一个新房间，等小伙伴们进来 :D</p>
+          </div>
+        </header>
+
+        <div class="card form-card">
+          <div class="field">
+            <label class="field-label" for="create-name">房间名</label>
+            <input type="text" class="input" id="create-name" placeholder="VoxLink Room" autocomplete="off">
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label" for="create-pw">密码（可选）</label>
+              <input type="text" class="input" id="create-pw" placeholder="不填则无需密码" autocomplete="off">
+            </div>
+            <div class="field">
+              <label class="field-label" for="create-category">分类</label>
+              <select class="select" id="create-category"></select>
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label" for="create-loader">启动器</label>
+              <select class="select" id="create-loader">
+                <option value="fabric">fabric</option>
+                <option value="forge">forge</option>
+                <option value="neoforge">neoforge</option>
+                <option value="unknown">其他/未知</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label" for="create-version">游戏版本</label>
+              <input type="text" class="input" id="create-version" placeholder="例如：1.21.1" maxlength="16" autocomplete="off">
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="create-host-port">本地 MC 端口</label>
+            <div class="port-row" id="create-port-row">
+              <input type="number" class="input" id="create-host-port" placeholder="25565" min="1024" max="65535" inputmode="numeric" autocomplete="off">
+              <select class="select port-select hidden" id="create-port-select"></select>
+              <button type="button" class="btn btn-ghost btn-sm" id="create-port-detect">重新检测</button>
+            </div>
+            <p class="form-hint" id="create-port-hint">进入此页后会自动检测本机 MC 端口…</p>
+            <p class="form-hint form-hint-error hidden" id="create-port-error"></p>
+          </div>
+          <div class="field hidden" id="create-category-custom-field">
+            <label class="field-label" for="create-category-custom">自定义分类</label>
+            <input type="text" class="input" id="create-category-custom" placeholder="输入自定义分类名称" maxlength="24" autocomplete="off">
+          </div>
+          <div class="field switch-field">
+            <div>
+              <div class="field-label">大厅显示</div>
+              <div class="field-sub">关闭后房间不会出现在大厅列表，需要房间代码加入</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="create-visible" checked><span class="slider"></span></label>
+          </div>
+          <div class="form-warn hidden" id="create-pw-warn">设置了密码，房间创建时会自动大厅隐藏哦</div>
+          <div class="form-error hidden" id="create-error"></div>
+          <button class="btn btn-primary btn-lg btn-block" id="create-btn">
+            <span class="ico" data-ico="create"></span><span>创建房间</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- 当前房间 -->
+      <section class="page" id="page-room">
+        <header class="page-head room-head">
+          <div class="room-head-main">
+            <div class="room-title-row">
+              <h1 class="page-title" id="room-name">房间</h1>
+              <span class="pill" id="room-status-pill">等待玩家</span>
+            </div>
+            <div class="room-code-row">
+              <button class="room-code" id="room-code" title="点击复制房间代码">------</button>
+              <button class="btn btn-ghost btn-sm" id="room-copy" title="复制房间代码">
+                <span class="ico" data-ico="copy"></span>复制
+              </button>
+              <span class="room-players" id="room-players">– / –</span>
+              <span class="heartbeat" id="room-heartbeat" title="心跳正常">
+                <span class="heartbeat-dot"></span>心跳正常
+              </span>
+            </div>
+          </div>
+          <button class="btn btn-danger" id="room-leave">
+            <span class="ico" data-ico="leave"></span><span id="room-leave-text">离开房间</span>
+          </button>
+        </header>
+
+        <div class="room-grid-2col">
+          <div class="room-col-main">
+            <!-- 连接卡（房客专用，房主不显示） -->
+            <div class="card conn-card hidden" id="conn-card">
+              <p class="conn-app-note hidden" id="conn-app-note">对方为应用端房间</p>
+              <div class="card-head">
+                <span class="ico ico-accent" data-ico="signal"></span>
+                <h2 class="card-title">连接</h2>
+                <span class="card-count" id="conn-phase-label">P2P 打洞</span>
+              </div>
+              <div class="conn-phase" id="conn-phase-box">
+                <span class="conn-spinner" id="conn-spinner"></span>
+                <span class="conn-phase-text" id="conn-phase-text">P2P 打洞进行中…</span>
+                <span class="conn-timer" id="conn-timer">已用时 0s</span>
+              </div>
+              <p class="conn-detail hidden" id="conn-detail"></p>
+              <p class="conn-hint hidden" id="conn-hint">打洞中…可稍后尝试其他方式</p>
+              <div class="conn-actions hidden" id="conn-actions">
+                <button class="btn btn-primary btn-sm hidden" id="conn-btn-direct">尝试直连</button>
+                <button class="btn btn-ghost btn-sm hidden" id="conn-btn-prelay">使用中继</button>
+                <button class="btn btn-ghost btn-sm hidden" id="conn-btn-turn">使用 TURN 中继</button>
+              </div>
+              <div class="conn-success hidden" id="conn-success">
+                <div class="conn-addr-row">
+                  <code class="conn-addr" id="conn-addr"></code>
+                  <button class="btn btn-ghost btn-sm" id="conn-copy" title="复制地址">
+                    <span class="ico" data-ico="copy"></span>复制
+                  </button>
+                </div>
+                <p class="conn-success-text">连接已打通！打开 MC → 多人游戏 → 添加服务器，粘贴此地址即可进入 :D<span class="conn-success-extra" id="conn-success-extra"></span></p>
+                <p class="conn-success-soft" id="conn-success-soft">若无法进入，对方可能在运行其他游戏或不兼容的版本</p>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="ico ico-accent" data-ico="signal"></span>
+                <h2 class="card-title">信令事件</h2>
+                <span class="card-count" id="signal-count">0 条</span>
+              </div>
+              <div class="signal-list" id="signal-list"></div>
+              <div class="empty empty-sm hidden" id="signal-empty">
+                <div class="empty-title">还没有信令事件</div>
+                <div class="empty-desc">等玩家进来，这里就会有动静 (・ω・)</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="ico ico-accent" data-ico="mods"></span>
+                <h2 class="card-title">必装 Mod（ModSync）</h2>
+                <button class="btn btn-ghost btn-sm" id="mods-refresh"><span class="ico" data-ico="refresh"></span>刷新</button>
+              </div>
+              <div id="mods-body"></div>
+            </div>
+          </div>
+
+          <div class="room-col-side">
+            <div class="card hidden" id="host-settings-card">
+              <div class="card-head">
+                <span class="ico ico-accent" data-ico="settings"></span>
+                <h2 class="card-title">房间设置</h2>
+              </div>
+              <div class="field">
+                <label class="field-label" for="hs-name">房间名</label>
+                <input type="text" class="input" id="hs-name" autocomplete="off">
+              </div>
+              <div class="field">
+                <label class="field-label" for="hs-category">分类</label>
+                <select class="select" id="hs-category"></select>
+              </div>
+              <div class="field switch-field">
+                <div><div class="field-label">大厅显示</div></div>
+                <label class="switch"><input type="checkbox" id="hs-visible"><span class="slider"></span></label>
+              </div>
+              <div class="field">
+                <label class="field-label" for="hs-pw">密码（留空不修改）</label>
+                <input type="text" class="input" id="hs-pw" placeholder="不修改请留空" autocomplete="off">
+              </div>
+              <button class="btn btn-primary btn-block" id="hs-save">保存设置</button>
+            </div>
+
+            <div class="card">
+              <div class="card-head collapsible" id="netlog-toggle">
+                <span class="ico ico-accent" data-ico="log"></span>
+                <h2 class="card-title">连接日志</h2>
+                <span class="collapse-arrow" id="netlog-arrow">▾</span>
+              </div>
+              <div class="netlog" id="netlog-body">
+                <div class="netlog-line netlog-faint">暂无日志</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 工单 -->
+      <section class="page" id="page-ticket">
+        <header class="page-head">
+          <div>
+            <h1 class="page-title">工单</h1>
+            <p class="page-desc">报问题、提建议；官方回复后会在这里提醒你</p>
+          </div>
+          <button class="btn btn-ghost" id="ticket-refresh">
+            <span class="ico" data-ico="refresh"></span>刷新
+          </button>
+        </header>
+
+        <!-- 列表 -->
+        <div id="ticket-view-list">
+          <button class="btn btn-primary btn-block" id="ticket-new">
+            <span class="ico" data-ico="create"></span><span>提交新工单</span>
+          </button>
+          <div class="ticket-list" id="ticket-list"></div>
+          <div class="empty hidden" id="ticket-empty">
+            <div class="empty-ico" aria-hidden="true">ᓚᘏᗢ</div>
+            <div class="empty-title">还没有工单</div>
+            <div class="empty-desc">连不上、进不去、有崩溃报告？提一张，回复会在这里等你 (・ω・)</div>
+          </div>
+        </div>
+
+        <!-- 新建 -->
+        <div id="ticket-view-new" class="hidden">
+          <div class="card form-card">
+            <div class="field">
+              <label class="field-label" for="ticket-desc">问题描述</label>
+              <textarea class="input" id="ticket-desc" rows="7" maxlength="10000"
+                        placeholder="写清：发生了什么、什么时候、做了什么操作、期望什么结果"></textarea>
+            </div>
+            <div class="field">
+              <div class="field-label">附件（可选）</div>
+              <button type="button" class="btn btn-ghost btn-sm" id="ticket-pick">
+                <span class="ico" data-ico="link"></span>选择文件
+              </button>
+              <div class="ticket-files" id="ticket-new-files"></div>
+            </div>
+            <div class="form-warn">提交后 10 分钟内只能再提交或追问一次（防灌水）</div>
+            <div class="form-error hidden" id="ticket-new-error"></div>
+            <div class="btn-row">
+              <button class="btn btn-ghost" id="ticket-new-cancel">返回</button>
+              <button class="btn btn-primary btn-push" id="ticket-submit">提交工单</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 详情 -->
+        <div id="ticket-view-detail" class="hidden">
+          <div class="card ticket-thread" id="ticket-thread"></div>
+          <div class="card form-card" style="margin-top:var(--sp-4)">
+            <div class="field">
+              <label class="field-label" for="ticket-reply-text">追问</label>
+              <textarea class="input" id="ticket-reply-text" rows="4" maxlength="10000"
+                        placeholder="补充信息或追问…"></textarea>
+            </div>
+            <div class="field">
+              <div class="field-label">附件（可选）</div>
+              <button type="button" class="btn btn-ghost btn-sm" id="ticket-reply-pick">
+                <span class="ico" data-ico="link"></span>选择文件
+              </button>
+              <div class="ticket-files" id="ticket-reply-files"></div>
+            </div>
+            <div class="form-error hidden" id="ticket-reply-error"></div>
+            <div class="btn-row">
+              <button class="btn btn-ghost" id="ticket-detail-back">返回列表</button>
+              <button class="btn btn-danger btn-sm" id="ticket-delete">删除工单</button>
+              <button class="btn btn-primary btn-push" id="ticket-reply-send">发送追问</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 相关链接 -->
+      <section class="page" id="page-links">
+        <header class="page-head">
+          <div>
+            <h1 class="page-title">相关链接</h1>
+            <p class="page-desc">VoxLink 的官方主页们，点开按钮会在浏览器打开</p>
+          </div>
+        </header>
+        <div class="links-grid" id="links-grid"></div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="page" id="page-settings">
+        <header class="page-head">
+          <div>
+            <h1 class="page-title">设置</h1>
+            <p class="page-desc">调整 VoxLink 桌面端的参数</p>
+          </div>
+        </header>
+
+        <div class="card form-card">
+          <div class="field">
+            <label class="field-label" for="set-theme">主题</label>
+            <select class="select" id="set-theme">
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </div>
+          <div class="form-error hidden" id="settings-error"></div>
+          <button class="btn btn-primary" id="set-save">保存设置</button>
+        </div>
+
+        <div class="card form-card">
+          <div class="about-row">
+            <div>
+              <div class="field-label">关于 VoxLink</div>
+              <p class="form-hint">VoxLink 应用端，为 Minecraft 联机而生的独立助手 qwq</p>
+            </div>
+            <span class="pill pill-accent" id="settings-version">v1.1.9-beta</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-box" id="toast-box"></div>
+
+  <script src="assets/js/core.js"></script>
+  <script src="assets/js/lobby.js"></script>
+  <script src="assets/js/join.js"></script>
+  <script src="assets/js/create.js"></script>
+  <script src="assets/js/room.js"></script>
+  <script src="assets/js/ticket.js"></script>
+  <script src="assets/js/links.js"></script>
+  <script src="assets/js/settings.js"></script>
+  <script src="assets/js/app.js"></script>
+</body>
+</html>
