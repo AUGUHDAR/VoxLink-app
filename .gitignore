@@ -3,6 +3,7 @@
 
 # 构建产物（build/ 目录本身是源码：wails 的图标、manifest、info.json 必须入库）
 build/bin/
+/dist/
 *.exe
 *.exe~
 *.dll

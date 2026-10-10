@@ -1,0 +1,168 @@
+# VoxLink 应用端发布矩阵：两个版本（CLI / UI）× 三个平台。
+#
+# 为什么必须有 CI：CLI 版是纯 Go，本机就能交叉编译；UI 版基于 Wails，
+# linux 需要 GCC+GTK/WebKitGTK、macOS 需要 Xcode 与系统 WKWebView，
+# 在一台 Windows 机器上无法产出这两个平台的 UI 产物（实测交叉编译直接失败）。
+#
+# CLI 产物过 UPX（体积约为 UI 版的一半以下），UI 产物不压：
+# UPX 会提高杀软/SmartScreen 误报率，只给"被启动器调用"的那一版用。
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号（留空则取 go 源码里的 appVersion 并以 tag 命名）
+        required: false
+        default: ''
+      draft:
+        description: 是否先建草稿
+        type: boolean
+        required: false
+        default: true
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- CLI 版：纯 Go，三平台三架构直接交叉编译，全部在 ubuntu runner 上产出 ----
+          - name: cli-windows-amd64
+            variant: cli
+            os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+          - name: cli-linux-amd64
+            variant: cli
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - name: cli-linux-arm64
+            variant: cli
+            os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+          - name: cli-macos-arm64
+            variant: cli
+            os: ubuntu-latest
+            goos: darwin
+            goarch: arm64
+          - name: cli-macos-amd64
+            variant: cli
+            os: ubuntu-latest
+            goos: darwin
+            goarch: amd64
+          # ---- UI 版：需要各平台的 CGO 工具链，只能在对应平台产 ----
+          - name: ui-windows-amd64
+            variant: ui
+            os: windows-latest
+            goos: windows
+            goarch: amd64
+          - name: ui-linux-amd64
+            variant: ui
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - name: ui-macos-arm64
+            variant: ui
+            os: macos-latest
+            goos: darwin
+            goarch: arm64
+          - name: ui-macos-amd64
+            variant: ui
+            os: macos-13
+            goos: darwin
+            goarch: amd64
+            # GitHub 正在淘汰 Intel macOS runner：这一格失败不拖红整条发布，
+            # 由 Release 正文说明 Intel 版待补。
+            continue-on-error: true
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 装 UI 版的系统依赖（Linux）
+        if: matrix.variant == 'ui' && matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+
+      - name: 构建
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.variant == 'ui' && '1' || '0' }}
+        run: |
+          go version
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            EXT=".exe"; GUIFLAG="-H windowsgui"
+          else
+            EXT=""; GUIFLAG=""
+          fi
+          OUT="dist/VoxLink-${{ matrix.variant == 'ui' && 'UI' || 'CLI' }}-${{ matrix.goos }}-${{ matrix.goarch }}$EXT"
+          mkdir -p dist
+          if [ "${{ matrix.variant }}" = "ui" ]; then
+            go build -trimpath -tags "desktop,production" -ldflags "-s -w $GUIFLAG" -o "$OUT" .
+          else
+            go build -trimpath -tags cli -ldflags "-s -w" -o "$OUT" .
+          fi
+          echo "ARTIFACT=$OUT" >> "$GITHUB_ENV"
+
+      - name: UPX 压缩（只压 CLI）
+        if: matrix.variant == 'cli'
+        run: |
+          sudo apt-get update && sudo apt-get install -y upx-ucl
+          upx --best --lzma "$ARTIFACT"
+          ls -la "$ARTIFACT"
+
+      - name: 打包（macOS/Linux 的 UI 版给 tar.gz，方便启动器直接解）
+        run: |
+          NAME=$(basename "$ARTIFACT")
+          if [ "${{ matrix.variant }}" = "cli" ]; then
+            zip -j "dist/${NAME}.zip" "$ARTIFACT" || true
+          fi
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voxlink-${{ matrix.name }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 汇总与校验和
+        run: |
+          mkdir -p out
+          find artifacts -maxdepth 1 -type f -exec cp {} out/ \;
+          cd out && sha256sum * > SHA256SUMS.txt && ls -la
+
+      - name: 建 Release（产物名自带版本/平台/架构，UPX 压缩项在正文标注）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
+          name: VoxLink 应用端 ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
+          draft: ${{ github.event.inputs.draft }}
+          files: out/*
+          body: |
+            两个版本：`VoxLink-UI-*`（图形界面）、`VoxLink-CLI-*`（给启动器集成，无窗口）。
+            CLI 版经 UPX 压缩，部分杀软可能误报，校验和见 SHA256SUMS.txt。

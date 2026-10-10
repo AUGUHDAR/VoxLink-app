@@ -1,0 +1,44 @@
+# 每次推送的最小验证：三个构建组合都能编译 + 单测 + CLI 三平台交叉编译。
+# 不发产物（发产物在 release.yml），目的是让"改一个常量就把某一版编译搞挂"当天就红。
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 装 Linux 的 UI 依赖（只为编译 desktop 标签这一版，UI 版无头环境能编译不能运行）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+
+      - name: go vet（三种标签组合）
+        run: |
+          go vet .
+          go vet -tags cli .
+          go vet -tags "desktop,production" .
+
+      - name: 单测（untagged 与 -tags cli）
+        run: |
+          go test -count=1 .
+          go test -count=1 -tags cli .
+
+      - name: CLI 三平台交叉编译
+        run: |
+          for t in windows/amd64 linux/amd64 linux/arm64 darwin/arm64; do
+            os=${t%/*}; arch=${t#*/}
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -tags cli -ldflags "-s -w" -o /tmp/probe-$os-$arch .
+            echo "  ok $os/$arch"
+          done
