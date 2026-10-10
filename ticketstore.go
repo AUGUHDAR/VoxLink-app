@@ -227,7 +227,11 @@ func (a *App) TicketSubmit(reqJSON string) string {
 	fields := map[string]string{
 		"description": desc,
 		"client":      "app",
-		"clientInfo":  fmt.Sprintf(`{"os":%q,"arch":%q,"version":%q}`, runtime.GOOS, runtime.GOARCH, appVersion),
+		// clientInfo 的键按服务端 ticketClientTag（server-go/ticket.go:654-661：
+		// 取 gameVersion/loader/modVersion/nickname 拼接）与模组侧口径
+		// （ui/FeedbackFormScreen.java:445-456 含 modVersion=MOD_VERSION）对齐：
+		// 本端版本键为 modVersion=appVersion，后台工单据此显示来源版本。
+		"clientInfo": fmt.Sprintf(`{"os":%q,"arch":%q,"version":%q,"modVersion":%q}`, runtime.GOOS, runtime.GOARCH, appVersion, appVersion),
 	}
 	var out struct {
 		ID           string `json:"id"`

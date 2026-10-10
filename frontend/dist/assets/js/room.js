@@ -260,7 +260,9 @@
     p2p:    { label: "P2P 打洞",  trying: "P2P 打洞进行中…" },
     direct: { label: "直连",      trying: "正在尝试直连…",   failed: "连接失败，对方可能是其他游戏、不兼容的版本或网络不可达" },
     prelay: { label: "玩家中继",  trying: "正在建立玩家中继…", failed: "连接失败，对方可能是其他游戏、不兼容的版本或网络不可达" },
-    turn:   { label: "TURN 中继", trying: "正在建立 TURN 中继…", failed: "TURN 中继建立失败，可稍后重试或改用玩家中继" }
+    turn:   { label: "TURN 中继", trying: "正在建立 TURN 中继…", failed: "TURN 中继建立失败，可稍后重试或改用玩家中继" },
+    // 互通房（Happy Link 镜像）：lang 键 voxlink.connection.fed_setup / fed_failed 同文案
+    fed:    { label: "互通中继",  trying: "正在通过互通中继连接房间...", failed: "互通房间连接失败" }
   };
 
   // 连接卡软提示按房间类型区分：mod 房（必是 MC）→ 版本不兼容；app 房 → 其他游戏/版本。

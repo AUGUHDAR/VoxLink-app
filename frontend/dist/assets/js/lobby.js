@@ -97,6 +97,9 @@
       tags += '<span class="pill">' + VL.esc(r.clientType) + "</span>";
     }
     if (r.protocolVersion) tags += '<span class="pill">协议 v' + VL.esc(r.protocolVersion) + "</span>";
+    // 互通：Happy Link 来源徽标（模组 RoomBrowserScreenBase.java:697-703，
+    // 品牌名 "Happy Link" 全语言不翻译，判据是 r.source === "happylink" 精确相等）
+    if (r.source === "happylink") tags += '<span class="pill pill-accent" title="Happy Link 互通房间">Happy Link</span>';
 
     return (
       '<div class="card card-hoverable room-card">' +

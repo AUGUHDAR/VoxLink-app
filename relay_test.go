@@ -1,12 +1,14 @@
 package main
 
-// relay_test.go — 玩家中继的房主侧契约（对齐模组 1.1.9 的候选池裁决）：
+// relay_test.go — 玩家中继的房主侧契约（对齐模组 1.1.9 的候选池裁决 + 1.2.0 的 v2 数据面）：
 //   - 候选池 = 除本房外所有房间里 relayEnabled 且非对称 NAT 的人（excludeRoom 自报）
 //   - 派发按"本会话已用过几次"挑最闲的候选，不退化成永远取第一个
 //   - relay_setup 带 replyHostId，relay_accept 必须转告自家房客
+//   - 1.2.0：relay_accept 必须带 chan，且候选者传输已 mux 化，否则一律不报 connected
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -125,10 +127,31 @@ func TestHostOnRelayAcceptForwardsConnected(t *testing.T) {
 	})
 	e := a.engine
 	e.mu.Lock()
+	if e.hPeers == nil {
+		e.hPeers = map[string]*hostPeer{}
+	}
 	e.code, e.token, e.isHost = "HOST01", "host-token", true
 	e.mu.Unlock()
 
-	e.hostOnRelayAccept(map[string]any{"forClientId": "guest-9"})
+	// 玩家中继 v2：host 侧接一条被中继会话，必须有该候选者的、已 mux 化的 joiner 传输。
+	uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("建测试 UDP socket 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = uc.Close() })
+	candRudp := newRudp(uc, nil)
+	candRudp.enableMux()
+	e.mu.Lock()
+	e.hPeers["cand-1"] = &hostPeer{id: "cand-1", rudp: candRudp}
+	e.mu.Unlock()
+
+	// 旧版候选者不带 chan：v1 裸流已被实证为跨流污染，一律不接
+	e.hostOnRelayAccept("cand-1", map[string]any{"forClientId": "guest-9"})
+	if len(got) != 0 {
+		t.Fatalf("chan-less relay_accept must be ignored (v1 retired), signals=%+v", got)
+	}
+
+	e.hostOnRelayAccept("cand-1", map[string]any{"forClientId": "guest-9", "chan": 1})
 	if len(got) != 1 {
 		t.Fatalf("signals = %+v, want exactly one relay_notify", got)
 	}
@@ -141,8 +164,17 @@ func TestHostOnRelayAcceptForwardsConnected(t *testing.T) {
 	}
 
 	// 缺 forClientId 就无从转告，不能广播
-	e.hostOnRelayAccept(map[string]any{})
+	e.hostOnRelayAccept("cand-1", map[string]any{"chan": 2})
 	if len(got) != 1 {
 		t.Fatalf("blank forClientId must not send anything, signals=%+v", got)
+	}
+
+	// 候选者传输未 mux 化（例如它其实是旧版）：不报 connected，让被中继侧超时换下一个候选
+	e.mu.Lock()
+	e.hPeers["cand-old"] = &hostPeer{id: "cand-old", rudp: newRudp(uc, nil)}
+	e.mu.Unlock()
+	e.hostOnRelayAccept("cand-old", map[string]any{"forClientId": "guest-9", "chan": 3})
+	if len(got) != 1 {
+		t.Fatalf("non-mux candidate must not report connected, signals=%+v", got)
 	}
 }

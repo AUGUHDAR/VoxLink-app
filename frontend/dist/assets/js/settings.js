@@ -5,7 +5,7 @@
 "use strict";
 
 (function (VL) {
-  var FALLBACK_VERSION = "1.1.9-beta";
+  var FALLBACK_VERSION = "1.2.0-beta";
   var els = {};
 
   function cacheEls() {

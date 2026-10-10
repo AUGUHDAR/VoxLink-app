@@ -12,9 +12,10 @@ package main
 //     （服务端跨房间转发）；同时给 requester 回 relay_notify {relayIp, relayPort}。
 //     候选为空 → relay_declined。收候选的 relay_accept {forClientId} → 转告该房客
 //     relay_notify {connected:true}。
-//   - 我们作为中继节点（guest 收 relay_setup）：与 target punch（15s）→ 若已有到 host 的
-//     rudp 则做流搬运桥（host rudp ↔ target rudp 互拷字节）→ 回 relay_accept {forClientId}
-//     to="host"；没有到 host 的隧道则 declined。
+//   - 我们作为中继节点（guest 收 relay_setup）：与 target punch（15s）→ 本端到 host 的传输
+//     必须已 mux 化（relayMuxV1），被中继会话走它上面的子通道 chan 1..7，
+//     与我们自己的会话（chan 0）字节级隔离 → 回 relay_accept {forClientId, chan}；
+//     没有到 host 的隧道、或传输未 mux 化 → declined（v1 裸流转发已被实证为串流污染，绝不接回）。
 
 import (
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -425,14 +427,44 @@ func (e *connEngine) pickRelayCandidate(cands []relayCandidate, requesterID, sel
 	return &best
 }
 
-// hostOnRelayAccept 候选者回执：把"桥已就绪"转告自家房客（relay_notify{connected}）。
-// 房主候选（host-<CODE>）只会回给请求方房主，这一步不做房客就只能干等超时。
-func (e *connEngine) hostOnRelayAccept(data map[string]any) {
+// hostOnRelayAccept 候选者回执：把被中继会话挂到候选者 joiner 传输的 mux 子通道上，
+// 再转告自家房客"桥已就绪"（relay_notify{connected}）。
+// from 是候选者的 clientId（模组 handleRelayAccept 的 from）——它的传输就是从这儿查的。
+func (e *connEngine) hostOnRelayAccept(from string, data map[string]any) {
 	forClientID := sigStr(data, "forClientId")
 	if forClientID == "" {
 		return
 	}
-	e.app.netLog("info", "中继节点已接受")
+	// 玩家中继 v2：relay_accept 带候选者在其 joiner 传输上分配的子通道号，
+	// host 侧把该子通道桥到一个独立的本地 MC 会话（被中继房客的专属桥）。
+	muxChan := sigInt(data, "chan")
+
+	e.mu.Lock()
+	candidate := e.hPeers[from]
+	var candidateRudp *rudpConn
+	if candidate != nil {
+		candidateRudp = candidate.rudp
+	}
+	mcPort := e.hostPort
+	e.mu.Unlock()
+
+	if muxChan <= 0 {
+		// 旧版候选者（无 chan 字段）：v1 数据面已被实证为跨流污染，绝不接旧线
+		e.app.netLog("warn", "relay_accept 未带 chan（候选者 "+from+" 为旧版），忽略：v1 中继数据面已退役")
+		return
+	}
+	if candidateRudp == nil || !candidateRudp.isMuxEnabled() {
+		// 候选者传输缺失/未 mux 化（如候选者刚好退出）：不通知 connected，
+		// 被中继侧的超时兜底自然 failover 到下一候选
+		e.app.netLog("warn", "relay_accept 来自 "+from+"，但其传输缺失或未 mux 化，忽略")
+		return
+	}
+
+	e.app.netLog("info", fmt.Sprintf("中继节点已接受：为 %s 挂接 chan%d 子通道桥", forClientID, muxChan))
+	startHostMuxRelayBridge(candidateRudp, muxChan, mcPort, e.app.netLog, func() {
+		e.app.netLog("info", fmt.Sprintf("被中继会话 %s（经 %s chan%d）已结束", forClientID, from, muxChan))
+	})
+
 	if err := e.sendSignal("relay_notify", map[string]any{"connected": true}, forClientID); err != nil {
 		e.app.netLog("warn", "转发 relay_notify 失败: "+err.Error())
 	}
@@ -440,7 +472,22 @@ func (e *connEngine) hostOnRelayAccept(data map[string]any) {
 
 // ---- 我们作为中继节点（guest 收 relay_setup）----
 
-// guestOnRelaySetup 收到 relay_setup：与 target 打洞并做 host↔target 流搬运桥。
+// relayMuxChanCounter 子通道轮转计数器（模组 ConnectionManager.relayMuxChanCounter，
+// 那是挂在 ConnectionManager 实例上的 AtomicInteger）。
+var relayMuxChanCounter atomic.Int64
+
+// allocateRelayMuxChan 1..7 轮转分配被中继会话的子通道（模组 CM:1443-1445）。
+// chan 0 是本连接自有流，永不参与分配。
+func allocateRelayMuxChan() int {
+	n := relayMuxChanCounter.Add(1) - 1 // 等价 getAndIncrement
+	if n < 0 {
+		n = -n
+	}
+	return 1 + int(n%7)
+}
+
+// guestOnRelaySetup 收到 relay_setup：与 target 打洞，把被中继会话接到本端 joiner 传输的
+// mux 子通道上（v2 数据面），再回 relay_accept{forClientId, chan}。
 func (e *connEngine) guestOnRelaySetup(from string, data map[string]any) {
 	targetClientID := sigStr(data, "targetClientId")
 	targetIP := sigStr(data, "targetIp")
@@ -450,9 +497,24 @@ func (e *connEngine) guestOnRelaySetup(from string, data map[string]any) {
 	hostRudp := e.gRudp
 	e.mu.Unlock()
 
-	if hostRudp == nil || targetIP == "" || targetPort <= 0 {
-		// 自己没有到 host 的隧道 → declined
-		e.app.netLog("warn", "收到 relay_setup 但无到 host 的隧道，declined")
+	// mux 三查（模组 CM:13215-13235）：被中继会话只能走本端连 host 传输的 mux 子通道。
+	// v1 曾在这里复用任意已连接传输转发裸流——两条 MC 会话字节交错进同一条有序流 +
+	// InputStream 双读者互抢，1.0.x 起从未真正可用。旧版 host 或本端未 mux 化一律婉拒，
+	// 绝不降级回坏接线。
+	if hostRudp == nil || !hostRudp.IsConnected() || !hostRudp.isMuxEnabled() {
+		if !hostSupportsCap(e.app.snapshotRoom(), relayMuxCapability) {
+			e.app.netLog("info", "host 未声明 relayMuxV1，婉拒 relay_setup（v1 中继数据面已被实证为串流污染，绝不接回）")
+		} else {
+			e.app.netLog("warn", "本端到 host 的传输未 mux 化，婉拒 relay_setup")
+		}
+		_ = e.sendSignal("relay_declined", map[string]any{}, "host")
+		return
+	}
+
+	target := net.ParseIP(targetIP)
+	if target == nil || targetPort <= 0 {
+		// 畸形信令不能拿去打洞：nil IP 的 UDPAddr 会让后续 rebind 把任意来源地址当对端绑定
+		e.app.netLog("warn", "relay_setup 目标地址非法，declined")
 		_ = e.sendSignal("relay_declined", map[string]any{}, "host")
 		return
 	}
@@ -464,8 +526,7 @@ func (e *connEngine) guestOnRelaySetup(from string, data map[string]any) {
 			_ = e.sendSignal("relay_declined", map[string]any{}, "host")
 			return
 		}
-		target := &net.UDPAddr{IP: net.ParseIP(targetIP), Port: targetPort}
-		win, actual, perr := punchRelayOnce(sock, target, relaySetupTimeout)
+		win, actual, perr := punchRelayOnce(sock, &net.UDPAddr{IP: target, Port: targetPort}, relaySetupTimeout)
 		if perr != nil {
 			_ = sock.Close()
 			e.app.netLog("warn", "中继节点对 target 打洞失败: "+perr.Error())
@@ -478,11 +539,28 @@ func (e *connEngine) guestOnRelaySetup(from string, data map[string]any) {
 		}
 		targetRc := newRudp(sock, actual)
 		targetRc.Start()
-		stop := pumpRelay(hostRudp, targetRc)
+
+		// F5：relayKey 必须带 clientId —— chan 1..7 是轮转复用的，纯 chan 当 key
+		// 会撞上上一段还没收尾的残留会话，新会话的 leg 就被 putIfAbsent 静默丢掉。
+		muxChan := allocateRelayMuxChan()
+		peerID := targetClientID
+		if peerID == "" {
+			peerID = "sym"
+		}
+		relayKey := fmt.Sprintf("muxrelay-%d-%s", muxChan, peerID)
+		rb := getRelayBridge(e.app.netLog)
+		// A 腿=本端 joiner 传输上的子通道（与自己的 chan 0 会话字节级隔离），
+		// B 腿=对被中继房客的专打传输（整条会话，收尾即关传输）
+		rb.startRelay(relayKey, fmt.Sprintf("host-chan%d", muxChan), peerID,
+			relayLegOf(rudpMuxRelayStream(hostRudp, muxChan)),
+			relayLegOf(rudpBridgeStream(targetRc)))
 		e.mu.Lock()
-		e.rAsNodeStop = stop
+		e.rAsNodeStop = rb.stopAllRelays
 		e.mu.Unlock()
-		if err := e.sendSignal("relay_accept", map[string]any{"forClientId": targetClientID}, "host"); err != nil {
+
+		// chan 随 accept 上报：host 侧要靠它把子通道桥到被中继房客的本地 MC 会话，
+		// 没有它 host 只会当我们是旧版候选者并忽略（v1 已退役）
+		if err := e.sendSignal("relay_accept", map[string]any{"forClientId": peerID, "chan": muxChan}, "host"); err != nil {
 			e.app.netLog("warn", "发送 relay_accept 失败: "+err.Error())
 		}
 		e.app.netLog("info", "中继桥已建立")

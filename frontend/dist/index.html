@@ -125,6 +125,8 @@
             <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第4位">
             <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第5位">
             <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第6位">
+            <!-- 第 7 格只在开头两位是 HL（Happy Link 互通码 HL+5 位）时出现，普通 6 位房号不受影响 -->
+            <input maxlength="1" inputmode="latin" autocomplete="off" spellcheck="false" aria-label="房间代码第7位（互通码）" class="hidden" id="code-fed">
           </div>
 
           <div class="field hidden" id="join-pw-field">
@@ -455,6 +457,7 @@
   <script src="assets/js/join.js"></script>
   <script src="assets/js/create.js"></script>
   <script src="assets/js/room.js"></script>
+  <script src="assets/js/modsync.js"></script>
   <script src="assets/js/ticket.js"></script>
   <script src="assets/js/links.js"></script>
   <script src="assets/js/settings.js"></script>

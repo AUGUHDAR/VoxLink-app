@@ -486,13 +486,21 @@ func TestRudpSendChunkCapForTurnPath(t *testing.T) {
 		t.Fatalf("turn path chunk cap = %d, want %d", rc.maxSendChunk(), rudpTurnMaxChunk)
 	}
 
+	// 模组的 sendBytes 要求 running（ReliableUdpTransport.java:1275），所以真实链路里写一定发生在 Start 之后；
+	// 这里也照实际时序先启动，再来验 TURN 路径的分块上限。
+	rc.Start()
+	t.Cleanup(func() { _ = rc.Close() })
+
 	payload := bytes.Repeat([]byte("m"), 4*rudpTurnMaxChunk)
 	if _, err := rc.Write(payload); err != nil {
 		t.Fatal(err)
 	}
 
-	// 4 个 DATA + 1 个 FEC_XOR（组满 4 即发），逐包剥信封后内层帧都不得越过节点 1400
+	// 4 个 DATA + 1 个 FEC_XOR（组满 4 即发），逐包剥信封后内层帧都不得越过节点 1400。
+	// 假对端从不 ACK，Start 之后重传定时器会反复补发同一 seq；keepalive 还复用 seq=0 ——
+	// 所以按 (type,seq) 去重，并且只数数据面两种帧。
 	buf := make([]byte, 4096)
+	seen := map[[2]uint32]bool{}
 	got := 0
 	for {
 		_ = peer.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
@@ -510,10 +518,22 @@ func TestRudpSendChunkCapForTurnPath(t *testing.T) {
 		if n > rudpTurnMaxChunk+22+4+4 {
 			t.Fatalf("wire datagram is %d bytes", n)
 		}
+		if len(inner) < 9 {
+			t.Fatalf("inner frame too short: %d", len(inner))
+		}
+		typ := inner[2]
+		if typ != rudpTypeData && typ != rudpTypeFecXor {
+			continue
+		}
+		key := [2]uint32{uint32(typ), binary.BigEndian.Uint32(inner[5:9])}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		got++
 	}
 	if got != 5 {
-		t.Fatalf("want 4 DATA + 1 FEC for a full 4-chunk group, got %d packets", got)
+		t.Fatalf("want 4 DATA + 1 FEC for a full 4-chunk group, got %d distinct packets", got)
 	}
 }
 

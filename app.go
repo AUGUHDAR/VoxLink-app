@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -9,23 +12,87 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	appVersion       = "1.1.9-beta"
+	appVersion       = "1.2.0-beta"
 	defaultServerURL = "https://p2p.wuhui.icu"
 	// clientProtocolVersion 上报给服务端的客户端协议号（模组 VoxLinkConstants.PROTOCOL_VERSION 同义）。
 	clientProtocolVersion = 7
 )
 
+// ---- 协议能力表（与模组 ProtocolNegotiator.java:12-38 逐字节对齐） ----
+//
+// 能力名常量化，每项配一个"本端已实现"门控常量；声明口径沿用模组规则
+// "只声明本端真正实现的项"（对齐 SignalingClient.java:202-211 的逐项过滤循环：
+// 遍历能力、命中门控才加入上报数组）。新增实现落地 = 把对应门控翻成 true。
+const (
+	capNameRelay           = "relay"            // ProtocolNegotiator.java:12
+	capNameIceRestart      = "ice_restart"      // ProtocolNegotiator.java:13
+	capNameContinuousRetry = "continuous_retry" // ProtocolNegotiator.java:14
+	capNamePunchAuthV1     = "punchAuthV1"      // ProtocolNegotiator.java:20
+	capNameOverlayAuthV1   = "overlayAuthV1"    // ProtocolNegotiator.java:22
+	capNameModSyncV1       = "modSyncV1"        // ProtocolNegotiator.java:24
+	capNameStdTurnV1       = "stdTurnV1"        // ProtocolNegotiator.java:30
+	capNameRelayMuxV1      = "relayMuxV1"       // ProtocolNegotiator.java:37
+)
+
+// 每项能力一个"已实现"门控。注释写明"什么东西让它为真"——该项对应的数据面/流程
+// 代码在本端存在并接线后才可置 true；未接线必须保持 false（虚报能力会让对端
+// 按新协议发帧，本端无法解析）。
+const (
+	// relay：relay.go/bridge.go 玩家中继转发数据面已实现。
+	capImplementedRelay = true
+	// ice_restart：链路死亡后重新协商已实现（conn_engine.go hostRestartPeer / ICE 重启流程）。
+	capImplementedIceRestart = true
+	// continuous_retry：打洞周期无上限持续重试已实现（conn_engine.go 会话寿命内轮次循环）。
+	capImplementedContinuousRetry = true
+	// punchAuthV1：punch_auth.go 打洞控制报文与数据面帧的截断 HMAC-SHA256 已实现。
+	capImplementedPunchAuthV1 = true
+	// overlayAuthV1：overlay 链路握手/中继报文来源认证——后续轮次接入，届时翻真。
+	capImplementedOverlayAuthV1 = false
+	// modSyncV1：modsync_*.go（并行 agent）"必装 Mod 清单"发布/拉取——接入前不声明；
+	// 对齐模组语义（SignalingClient.java:204-208）：未声明时房客按旧版房主秒判"无清单"直通。
+	capImplementedModSyncV1 = false
+	// stdTurnV1：std_turn.go RFC 5766 Allocate/ChannelBind/Refresh 已实现，
+	// 任一端旧版自动回落自定义协议 v1（ProtocolNegotiator.java:26-29 语义）。
+	capImplementedStdTurnV1 = true
+	// relayMuxV1：mux 子通道数据面（候选者↔host 被中继会话分路承载，relay.go/conn_engine.go，
+	// 并行 agent 本轮接线）——mux 合入即真；若 mux 未合入必须回置 false，
+	// 否则旧版对端经本端做玩家中继会拿到 mux 帧格式（ProtocolNegotiator.java:31-36 语义）。
+	capImplementedRelayMuxV1 = true
+)
+
+// currentCapabilities 按门控装配本端上报的能力表（只含已实现项）。
+// 顺序无协议含义（服务端/模组均按集合处理），保持与模组声明集一致的可读顺序。
+func currentCapabilities() []string {
+	specs := []struct {
+		name        string
+		implemented bool
+	}{
+		{capNameRelay, capImplementedRelay},
+		{capNameIceRestart, capImplementedIceRestart},
+		{capNameContinuousRetry, capImplementedContinuousRetry},
+		{capNamePunchAuthV1, capImplementedPunchAuthV1},
+		{capNameOverlayAuthV1, capImplementedOverlayAuthV1},
+		{capNameModSyncV1, capImplementedModSyncV1},
+		{capNameStdTurnV1, capImplementedStdTurnV1},
+		{capNameRelayMuxV1, capImplementedRelayMuxV1},
+	}
+	out := make([]string, 0, len(specs))
+	for _, s := range specs {
+		if s.implemented {
+			out = append(out, s.name)
+		}
+	}
+	return out
+}
+
 // appCapabilities 本端协议能力（与模组 ProtocolNegotiator.CURRENT_CAPABILITIES 对齐，
-// 只声明本端真正实现的项：模组同步/overlay 认证未接入，故不声明）。
-//   - relay / continuous_retry：玩家中继与持续重试
-//   - ice_restart：链路死亡后的重新协商（requestIceRestart）
-//   - punchAuthV1：打洞控制包与数据面帧附截断 HMAC-SHA256
-//   - stdTurnV1：TURN 中继走标准 RFC 5766（否则自动回落自定义协议 v1）
-var appCapabilities = []string{"relay", "ice_restart", "continuous_retry", "punchAuthV1", "stdTurnV1"}
+// 只声明本端真正实现的项，见上方逐项门控）。
+var appCapabilities = currentCapabilities()
 
 // App 是会话状态与流程层的持有者：UI 版把它 Bind 给前端，CLI 版直接调同一批方法。
 // 界面相关的一切（事件推送、文件对话框）都走 sink / picker 两个接口注入，见 events.go。
@@ -44,6 +111,16 @@ type App struct {
 	isHost  bool
 	room    map[string]any
 	session *session
+
+	// joinAttemptGeneration 加入尝试代数（对齐模组 ConnectionManager.java:158 joinAttemptGeneration）：
+	// JoinRoom 开新一轮 +1；任何 kill of connection attempts（leaveInternal）也 +1，
+	// 旧重试链发现代数变了立即放弃（ConnectionManager.java:14911）。
+	joinAttemptGeneration atomic.Int64
+
+	// joinNonceMu 保护 joinNonce（对齐模组 SignalingClient.java:69,279-283：
+	// 同一 SignalingClient 生命周期内复用同一幂等键，重试不换 key，服务端按 key 去重复用 clientId）。
+	joinNonceMu sync.Mutex
+	joinNonce   string
 }
 
 // NewApp 创建 App 实例（测试可覆盖 settingsPath）。
@@ -196,7 +273,11 @@ func (a *App) startSession(code, token string, isHost bool, room map[string]any,
 }
 
 // leaveInternal 停止当前会话并尽力通知服务器离开。幂等。
+// 开头先 bump 加入代数（对齐模组 killAllConnectionAttempts：ConnectionManager.java:13687/13812
+// 第一步就是 joinAttemptGeneration.incrementAndGet()），让在途的 join 重试链自行放弃。
 func (a *App) leaveInternal() {
+	a.joinAttemptGeneration.Add(1)
+
 	a.mu.Lock()
 	s := a.session
 	code, token, isHost := a.code, a.token, a.isHost
@@ -224,6 +305,7 @@ func (a *App) leaveInternal() {
 // clearSession 由会话 goroutine 在结束时调用，重置 App 状态（仅当仍是本会话）。
 func (a *App) clearSession(s *session) {
 	a.mu.Lock()
+	had := false
 	if a.session == s {
 		a.session = nil
 		a.state = "idle"
@@ -231,8 +313,14 @@ func (a *App) clearSession(s *session) {
 		a.token = ""
 		a.isHost = false
 		a.room = nil
+		had = true
 	}
 	a.mu.Unlock()
+	// 模组的拆除点是 stopScheduledTasks（RoomManager.java:1105）→ app 侧等价落点就是这里。
+	// 必须放在锁外：stopFedTunnel 会经 netLog→emit 回来抢同一把 a.mu，锁内调用直接死锁。
+	if had {
+		a.stopFedTunnel()
+	}
 }
 
 // updateRoomInfo 心跳响应携带的房间信息回写（有变化才广播）。
@@ -303,23 +391,29 @@ func parseParams(jsonStr string, out any) error {
 
 // ==================== 绑定方法（前端契约，勿改签名） ====================
 
-// GetSettings 返回 {serverUrl, theme, version}。serverUrl 恒为默认（应用内不可改）。
+// GetSettings 返回 {serverUrl, theme, version, clientTag}。serverUrl 恒为默认（应用内不可改）。
+// clientTag 为启动器/用户来源标记（上报服务端供后台展示），默认空 = 不上报。
 func (a *App) GetSettings() string {
 	a.mu.Lock()
 	theme := a.settings.Theme
+	clientTag := a.settings.ClientTag
 	a.mu.Unlock()
 	return wrapOK(map[string]any{
 		"serverUrl": defaultServerURL,
 		"theme":     theme,
 		"version":   appVersion,
+		"clientTag": clientTag,
 	})
 }
 
-// SaveSettings 保存 {theme?}（参数里的 serverUrl 一律忽略）并返回同 GetSettings。
+// SaveSettings 保存 {theme?, clientTag?}（参数里的 serverUrl 一律忽略）并返回同 GetSettings。
+// clientTag 用指针区分"未提供"与"显式清空"；入库前按服务端同款规则归一
+// （小写+trim，不匹配 ^[a-z0-9_-]{1,32}$ 一律丢空，对齐 server-go/roommanager.go:410-413 的"丢弃不拒绝"）。
 func (a *App) SaveSettings(settingsJSON string) string {
 	var req struct {
-		ServerURL string `json:"serverUrl"` // 忽略（收到也不应用）
-		Theme     string `json:"theme"`
+		ServerURL string  `json:"serverUrl"` // 忽略（收到也不应用）
+		Theme     string  `json:"theme"`
+		ClientTag *string `json:"clientTag"`
 	}
 	if err := parseParams(settingsJSON, &req); err != nil {
 		return wrapErr("INVALID_PARAMS", err.Error())
@@ -329,12 +423,23 @@ func (a *App) SaveSettings(settingsJSON string) string {
 	if req.Theme != "" {
 		a.settings.Theme = req.Theme
 	}
+	if req.ClientTag != nil {
+		a.settings.ClientTag = normalizeClientTag(*req.ClientTag)
+	}
 	a.mu.Unlock()
 
 	if err := a.saveSettings(); err != nil {
 		return wrapErr("IO", err.Error())
 	}
 	return a.GetSettings()
+}
+
+// clientTagOf 读当前 clientTag（已在入口归一，可再归一次兜底磁盘手工编辑的值）。
+func (a *App) clientTagOf() string {
+	a.mu.Lock()
+	tag := a.settings.ClientTag
+	a.mu.Unlock()
+	return normalizeClientTag(tag)
 }
 
 // GetCategories 返回分类 map（键值如 survival->生存）。
@@ -427,8 +532,10 @@ func (a *App) RoomInfo(code string) string {
 // CreateRoom 创建房间并自动开启会话。
 // 契约：参数 {name,password,category,visible,hostPort,loader,gameVersion}（无 maxPlayers/authType）。
 // hostPort 必填（1024-65535）；create body 的 maxPlayers 固定 20、不发 authType；
-// loader/gameVersion 用传入值（空则 "unknown"）；natType 用探测结果（拿不到 "unknown"），
-// clientCapabilities 见 appCapabilities（relay/ice_restart/continuous_retry/punchAuthV1/stdTurnV1）。
+// loader/gameVersion 用传入值（空则 "unknown"；loader 如实上报启动器/用户所选加载器名，
+// 不硬编码，对齐 docs/launcher-integration.md §2B#14），
+// natType 用探测结果（拿不到 "unknown"），
+// clientCapabilities 见 appCapabilities（逐项门控装配），modVersion=appVersion。
 //
 // 流程：参数校验 → 会话互斥检查 → 端口探测 → STUN → 调用 /room/create → 启会话。
 // 端口探测失败不再调用 create API，直接返回 PORT_NOT_LISTENING。
@@ -489,7 +596,16 @@ func (a *App) CreateRoom(reqJSON string) string {
 		"loader":                loader,
 		"clientType":            "app",
 		"clientProtocolVersion": clientProtocolVersion,
-		"clientCapabilities":    appCapabilities,
+		"clientCapabilities":    a.modSyncCapabilities(),
+		// modVersion：本端版本号，服务端存进房间（server-go/roommanager.go:386-390）
+		// 并渲染到大厅/后台版本列。模组在 create 即无条件上报
+		// （SignalingClient.java:192），本端对齐携带 appVersion。
+		"modVersion": appVersion,
+	}
+	// clientTag：启动器来源标记（kamucl 等），默认空不带。服务端 create 侧
+	// 校验/丢弃（roommanager.go:410-413），本端已在设置入口同款归一，为空则不发。
+	if tag := a.clientTagOf(); tag != "" {
+		body["clientTag"] = tag
 	}
 	if req.Password != "" {
 		body["password"] = req.Password
@@ -502,6 +618,9 @@ func (a *App) CreateRoom(reqJSON string) string {
 		HostIP    string `json:"hostIp"`
 		HostPort  int    `json:"hostPort"`
 		ExpiresIn int    `json:"expiresIn"`
+		// Fed：服务端为本房开的 Happy Link 镜像凭据（RoomManager.java:359 用 isJsonObject 判定，
+		// 这里用 any 复刻"缺字段/非对象都不当镜像房"的宽容解析）。
+		Fed any `json:"fed"`
 	}
 	if err := a.api.post(a.baseURL(), "/room/create", body, &data); err != nil {
 		return wrapCallErr(err)
@@ -522,7 +641,13 @@ func (a *App) CreateRoom(reqJSON string) string {
 		"expiresIn":      data.ExpiresIn,
 		"isHost":         true,
 	}
+	// 互通：服务端给了 fed 凭据就是镜像房，房主侧隧道必须在会话起来之前武装好
+	// （RoomManager.java:367 早于 :371 的时序，晚了会有一窗 HL 玩家打不进本地 MC）。
+	if applyFedCreatePayload(room, data.Fed) {
+		a.startFedTunnelForRoom(room, req.HostPort)
+	}
 	a.startSession(data.Code, data.HostToken, true, room, "")
+	a.modSyncOnRoomCreated() // 建房成功后立即后台构建两档清单（ModSyncManifestService 的 onRoomCreated）
 
 	return wrapOK(map[string]any{
 		"code":      data.Code,
@@ -546,8 +671,60 @@ func requireIdleSession(a *App) string {
 	return ""
 }
 
+// ---- 加入房间瞬态重试（对齐模组 ConnectionManager.java:156-157/14891-14930 + RoomManager.java:88） ----
+
+const (
+	// joinTransientMaxAttempts 最多 3 次尝试（ConnectionManager.java:156 JOIN_TRANSIENT_MAX_ATTEMPTS = 3）。
+	joinTransientMaxAttempts = 3
+	// joinRetryBackoffFirstMs / joinRetryBackoffSecondMs 重试退避 {1500,3000}ms
+	// （ConnectionManager.java:157 JOIN_RETRY_BACKOFF_MS = {1500L, 3000L}）。
+	joinRetryBackoffFirstMs  = 1500
+	joinRetryBackoffSecondMs = 3000
+)
+
+// isTransientJoinError 判定加入失败是否瞬态可重试。
+// 对齐模组 RoomManager.java:88 TRANSIENT_ERRORS = {NETWORK_ERROR, CDN_ERROR, RATE_LIMITED}；
+// 其中 "NETWORK" 是本端 api.go 对传输层失败的等价编码（模组侧由 SignalingClient.java:640-650
+// 把连接超时/拒连/DNS 统一映射成 NETWORK_ERROR，语义同一类）。
+func isTransientJoinError(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		// 本端所有传输层失败都在 api.go do() 里包成 *APIError{Code:"NETWORK"}
+		// （等价模组 SignalingClient.java:640-650 把连接超时/拒连/DNS 映射成 NETWORK_ERROR）；
+		// 非 APIError 说明是响应解析等本地问题，模组侧对应 RuntimeException（不可重试）。
+		return false
+	}
+	switch ae.Code {
+	case "NETWORK_ERROR", "CDN_ERROR", "RATE_LIMITED", "NETWORK":
+		return true
+	}
+	return false
+}
+
+// joinIdempotencyKey 返回本 App 生命周期的加入幂等键（懒生成、跨重试链复用，
+// 对齐模组 SignalingClient.java:69,279-283：nonce 只生成一次，重试不换 key；
+// 服务端按 key 去重并复用原 clientId，roommanager.go:777-800）。
+func (a *App) joinIdempotencyKey() string {
+	a.joinNonceMu.Lock()
+	defer a.joinNonceMu.Unlock()
+	if a.joinNonce == "" {
+		buf := make([]byte, 16)
+		if _, err := rand.Read(buf); err != nil {
+			// 随机源异常兜底：时间戳派生 32 位 hex，保证 key 唯一即可（服务端只按字符串去重）。
+			buf = make([]byte, 16)
+			n := time.Now().UnixNano()
+			for i := range buf {
+				buf[i] = byte(n >> (i % 8 * 8))
+			}
+		}
+		a.joinNonce = hex.EncodeToString(buf)
+	}
+	return a.joinNonce
+}
+
 // JoinRoom 加入房间并自动开启会话（body 带与 create 相同的 caps 组）。
-// 流程：参数校验 → 会话互斥 → 调用 /room/join → 启会话。
+// 流程：参数校验 → 会话互斥 → /room/join（瞬态错误有界重试：≤3 次尝试、退避 {1500,3000}ms、
+// 代数保护）→ 启会话。
 // 不再做自动 LeaveRoom 幂等：建房中再加入是事故源，统一走 SESSION_ACTIVE。
 func (a *App) JoinRoom(reqJSON string) string {
 	var req struct {
@@ -558,7 +735,7 @@ func (a *App) JoinRoom(reqJSON string) string {
 		return wrapErr("INVALID_PARAMS", err.Error())
 	}
 	req.Code = strings.ToUpper(strings.TrimSpace(req.Code))
-	if !validateRoomCode(req.Code) {
+	if !ValidateJoinRoomCode(req.Code) {
 		return wrapErr("INVALID_PARAMS", "房间码必须为 6 位（字符集 A-Z 去掉 I/O、2-9 去掉 0/1）")
 	}
 
@@ -567,23 +744,65 @@ func (a *App) JoinRoom(reqJSON string) string {
 		return msg
 	}
 
+	// 新一轮加入：代数 +1（模组 startVoxLinkP2P 的 joinAttemptGeneration.incrementAndGet()，
+	// ConnectionManager.java:14892）。leaveInternal 同样 bump，令旧链放弃。
+	gen := a.joinAttemptGeneration.Add(1)
+
 	body := map[string]any{
 		"code":                  req.Code,
 		"clientType":            "app",
 		"clientProtocolVersion": clientProtocolVersion,
-		"clientCapabilities":    appCapabilities,
+		"clientCapabilities":    a.modSyncCapabilities(),
+		// modVersion：服务端从 join body 读取并按 clientId 落库（roommanager.go:739-743,829-831），
+		// 后台"房间管理"卡片据此显示房客版本；模组 join 侧同样携带（SignalingClient.java:286）。
+		"modVersion":     appVersion,
+		"idempotencyKey": a.joinIdempotencyKey(),
 	}
 	if req.Password != "" {
 		body["password"] = req.Password
 	}
 
+	// 瞬态重试链（对齐 startVoxLinkP2PAttempt，ConnectionManager.java:14896-14930）：
+	// 失败 → 可重试 && 未到 3 次上限 && 代数未变 → 退避后重试；否则终止并留痕。
+	// 重试不换请求体：同一 idempotencyKey，服务端复用 clientId（幂等分支）。
 	var data struct {
 		ClientToken string         `json:"clientToken"`
 		ClientID    string         `json:"clientId"`
 		Room        map[string]any `json:"room"`
 	}
-	if err := a.api.post(a.baseURL(), "/room/join", body, &data); err != nil {
-		return wrapCallErr(err)
+	lastErr := error(nil)
+	for attempt := 1; attempt <= joinTransientMaxAttempts; attempt++ {
+		start := time.Now()
+		err := a.api.post(a.baseURL(), "/room/join", body, &data)
+		if err == nil {
+			if attempt > 1 {
+				a.netLog("info", fmt.Sprintf("join_ok attempt=%d/%d elapsed_ms=%d", attempt, joinTransientMaxAttempts, time.Since(start).Milliseconds()))
+			}
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		a.netLog("warn", fmt.Sprintf("join_attempt_failed attempt=%d/%d elapsed_ms=%d err=%s", attempt, joinTransientMaxAttempts, time.Since(start).Milliseconds(), err.Error()))
+		retryable := isTransientJoinError(err)
+		if !retryable || attempt >= joinTransientMaxAttempts || gen != a.joinAttemptGeneration.Load() {
+			break
+		}
+		delayMs := joinRetryBackoffFirstMs
+		if attempt >= 2 {
+			delayMs = joinRetryBackoffSecondMs
+		}
+		// 日志用键（i18n-neutral）：join_retry，携带 attempt 进度（对齐 UiLogBus voxlink.logui.join_retry）。
+		a.netLog("warn", fmt.Sprintf("join_retry attempt=%d/%d delay_ms=%d", attempt+1, joinTransientMaxAttempts, delayMs))
+		time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		// 代数被 bump（取消/离开）→ 旧链放弃，不再发起下一次尝试。
+		if gen != a.joinAttemptGeneration.Load() {
+			lastErr = &APIError{Code: "CANCELLED", Message: "join chain superseded"}
+			break
+		}
+	}
+	if lastErr != nil {
+		a.netLog("error", "join_failed err="+lastErr.Error())
+		return wrapCallErr(lastErr)
 	}
 
 	room := data.Room
@@ -596,7 +815,9 @@ func (a *App) JoinRoom(reqJSON string) string {
 	if _, ok := room["clientType"]; !ok || room["clientType"] == "" {
 		room["clientType"] = "app"
 	}
+	applyFedJoinPayload(room) // join 回包里的 fedAddress/source（RoomManager.java:766-771）
 	a.startSession(req.Code, data.ClientToken, false, room, data.ClientID)
+	a.connectFedIfHappyLink() // HL 房：不打洞不走中继，直接 TCP 转中继（RoomManager.java:827-830）
 
 	return wrapOK(map[string]any{
 		"clientToken": data.ClientToken,

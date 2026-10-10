@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -12,12 +13,16 @@ import (
 type appSettings struct {
 	ServerURL string `json:"serverUrl"`
 	Theme     string `json:"theme"`
+	// ClientTag 启动器/用户来源标记（如 kamucl），随 create 上报服务端供后台展示
+	// （server-go/roommanager.go:409-413 同款校验）；默认空 = 不上报。
+	ClientTag string `json:"clientTag"`
 }
 
 func defaultSettings() appSettings {
 	return appSettings{
 		ServerURL: defaultServerURL,
 		Theme:     "light",
+		ClientTag: "",
 	}
 }
 
@@ -47,6 +52,7 @@ func (a *App) loadSettings() {
 	if s.Theme == "" {
 		s.Theme = "light"
 	}
+	s.ClientTag = normalizeClientTag(s.ClientTag)
 	a.mu.Lock()
 	a.settings = s
 	a.mu.Unlock()
@@ -79,6 +85,24 @@ func validateServerURL(u string) bool {
 	}
 	lower := strings.ToLower(u)
 	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
+// clientTagPattern 与服务端 roommanager.go:411 的正则逐字节一致（^[a-z0-9_\-]{1,32}$，
+// Go RE2 里 `_`/`-` 在字符类中无需转义，写法 ^[a-z0-9_-]{1,32}$ 语义相同）。
+var clientTagPattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+
+// normalizeClientTag 复刻服务端处理（server-go/roommanager.go:410-413）：
+// 先 TrimSpace 再 ToLower，然后匹配正则；不合规"丢弃"为空而非报错——
+// 与服务端对非法 clientTag 静默置空的口径一致（兼容老客户端语义）。
+func normalizeClientTag(tag string) string {
+	t := strings.ToLower(strings.TrimSpace(tag))
+	if t == "" {
+		return ""
+	}
+	if !clientTagPattern.MatchString(t) {
+		return ""
+	}
+	return t
 }
 
 // validateRoomCode 校验 6 位房间码字符集。

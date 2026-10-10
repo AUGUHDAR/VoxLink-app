@@ -24,13 +24,38 @@ const (
 	stdTurnChannel        = 0x4000
 )
 
-// hostSupportsCap 房主能力表（room.hostCapabilities）是否含 cap。
+// hostCapabilitiesOf 取房主能力表原始数组（join 回包 room.hostCapabilities，
+// server-go/roommanager.go:897 透出；JSON 反序列化后为 []any）。
+func hostCapabilitiesOf(room map[string]any) []any {
+	caps, _ := room["hostCapabilities"].([]any)
+	return caps
+}
+
+// hostIsLegacy 房主是否旧版（房客视角），对齐 RoomInfo.isHostLegacy
+// （fabric .../room/RoomInfo.java:243-245）：hostProtocolVersion==0 或能力表为空。
+// 视角为 nil 时按"无房主信息"处理（模组侧 room==null 由各 hostSupportsXxx 直接判 false，
+// ProtocolNegotiator.java:65-92）。HL 互通导入房即此形态：protocolVersion=0、caps=[]
+// （server-go/hlmaster.go:1451-1452）→ 判旧版，能力一律不采信。
+func hostIsLegacy(room map[string]any) bool {
+	if room == nil {
+		return true
+	}
+	if roomInt(room, "hostProtocolVersion") == 0 {
+		return true
+	}
+	return len(hostCapabilitiesOf(room)) == 0
+}
+
+// hostSupportsCap 房主能力表（room.hostCapabilities）是否含 cap（房客视角）。
+// 对齐模组 ProtocolNegotiator hostSupportsPunchAuth/hostSupportsStdTurn/hostSupportsRelayMux
+// （.../network/ProtocolNegotiator.java:65-92）三件套的统一口径：
+// room != nil && !isHostLegacy() && capabilities.contains(cap)——
+// 旧版房主（protocolVersion==0 或空能力表）即便数据里混入了 cap 也不采信。
 func hostSupportsCap(room map[string]any, cap string) bool {
-	caps, ok := room["hostCapabilities"].([]any)
-	if !ok {
+	if hostIsLegacy(room) {
 		return false
 	}
-	for _, c := range caps {
+	for _, c := range hostCapabilitiesOf(room) {
 		if s, ok := c.(string); ok && s == cap {
 			return true
 		}
@@ -38,7 +63,16 @@ func hostSupportsCap(room map[string]any, cap string) bool {
 	return false
 }
 
+// hostSupportsStdTurn 房主是否支持标准 TURN（RFC 5766），即 ProtocolNegotiator.java:70-72
+// 的 hostSupportsStdTurn：!isHostLegacy && caps 含 stdTurnV1。turn_flow 决策点等价改写，
+// 保留命名入口对齐模组。
+func hostSupportsStdTurn(room map[string]any) bool {
+	return hostSupportsCap(room, capNameStdTurnV1)
+}
+
 // peerCapsContain 信令 data 里的能力数组是否含 cap（join_request.clientCapabilities）。
+// 对端（加入者）侧判定，对齐 ProtocolNegotiator.supportsXxx(PeerInfo)（:47-87）：
+// 纯能力表查询、不叠加 legacy 门（legacy 判定另见 peerDataIsLegacy / ProtocolNegotiator.java:43-45）。
 func peerCapsContain(data map[string]any, cap string) bool {
 	caps, ok := data["clientCapabilities"].([]any)
 	if !ok {
@@ -50,6 +84,30 @@ func peerCapsContain(data map[string]any, cap string) bool {
 		}
 	}
 	return false
+}
+
+// peerDataIsLegacy join_request data 视角的旧版加入者判定，对齐
+// ProtocolNegotiator.isLegacyPeer（:43-45）：peer==null → 旧版；
+// protocolVersion==0 || capabilities==nil || capabilities.isEmpty() → 旧版。
+// 数据侧依据：RoomInfo.PeerInfo.protocolVersion 默认 0（RoomInfo.java:669），
+// 服务端仅当加入者 clientProtocolVersion>0 才在 join_request 里带上
+// clientProtocolVersion/clientCapabilities（server-go/roommanager.go:865-869）——
+// 字段缺失即 0/空，正是老客户端形态。host 侧 hostPeer 的登记改造见交接 hunk。
+func peerDataIsLegacy(data map[string]any) bool {
+	if data == nil {
+		return true
+	}
+	if sigInt(data, "clientProtocolVersion") == 0 {
+		return true
+	}
+	caps, ok := data["clientCapabilities"].([]any)
+	return !ok || len(caps) == 0
+}
+
+// peerCapsLegacy 已登记 hostPeer 形态的旧版判定（供 conn_engine 侧接线）：
+// 与 peerDataIsLegacy 同规则，输入改为解析后的 caps 切片 + 协议号。
+func peerCapsLegacy(caps []string, protocolVersion int) bool {
+	return protocolVersion == 0 || len(caps) == 0
 }
 
 // ---- 引擎辅助 ----
@@ -494,6 +552,8 @@ func (e *connEngine) hostOnTurnAlloc(from string, data map[string]any) {
 		e.mu.Lock()
 		e.turnTransport = transport
 		e.mu.Unlock()
+		// TURN 承载同样要能跑玩家中继 v2：模组的 mux 闸门在通用传输工厂里（CM:15703），不按承载分叉。
+		setupRelayMux(transport, peerCapsContain(data, relayMuxCapability), e.app.netLog, from, "host")
 		transport.Start()
 		startHostLazyBridge(transport, mcPort, e.app.netLog)
 
@@ -582,6 +642,7 @@ func (e *connEngine) hostOnStdTurnAlloc(from string, data map[string]any) {
 		e.mu.Lock()
 		e.turnTransport = transport
 		e.mu.Unlock()
+		setupRelayMux(transport, peerCapsContain(data, relayMuxCapability), e.app.netLog, from, "host")
 		transport.Start()
 		startHostLazyBridge(transport, mcPort, e.app.netLog)
 
@@ -643,6 +704,7 @@ func (e *connEngine) guestOnTurnReady(data map[string]any) {
 	transport.started.Store(true)
 	e.mu.Unlock()
 
+	setupRelayMux(transport, hostSupportsCap(e.app.snapshotRoom(), relayMuxCapability), e.app.netLog, "guest", "joiner")
 	transport.Start()
 	e.turnGuestBridgeUp(transport)
 }
@@ -700,6 +762,7 @@ func (e *connEngine) guestOnStdTurnReady(data map[string]any) {
 		e.mu.Unlock()
 		e.applyTurnAuth(transport, e.roomCode(), e.turnJoinerID(), room, nil)
 
+		setupRelayMux(transport, hostSupportsCap(room, relayMuxCapability), e.app.netLog, "guest", "joiner")
 		transport.Start()
 		e.turnGuestBridgeUp(transport)
 	}()

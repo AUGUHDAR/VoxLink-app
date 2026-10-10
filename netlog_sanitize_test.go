@@ -145,6 +145,17 @@ func collectNetLogMessageLiterals() []string {
 		"尝试重连 WebSocket",
 		"信令轮询失败",
 		"WebSocket 已连接",
+		// session.go — WS 传输硬化（标识化文案，i18n-neutral 键）
+		"ws_backoff step=%d delay_ms=%d reason=%s",
+		"ws_ping_failed err=",
+		"ws_watchdog_dead",
+		"ws_reconnect_attempt",
+		"ws_dead",
+		// app.go — 加入重试链（标识化文案，对齐 voxlink.logui.join_retry/join_failed）
+		"join_attempt_failed attempt=%d/%d elapsed_ms=%d err=%s",
+		"join_retry attempt=%d/%d delay_ms=%d",
+		"join_ok attempt=%d/%d elapsed_ms=%d",
+		"join_failed err=",
 		// bridge.go
 		"host 桥：无法连接本地 MC 端口，关闭该条隧道",
 		"host 桥：连接本地 MC 端口失败，稍后重试",

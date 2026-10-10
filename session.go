@@ -23,7 +23,24 @@ const (
 	wsResponseTimeout        = 15 * time.Second
 	// WS 健康时信令由服务端推送实时到达，帧轮询只是安全网（对齐 mod 端 5s 策略）
 	wsPollInterval = 5 * time.Second
+
+	// ---- WS 传输硬化参数（逐项对齐 network/SignalingWsTransport.java） ----
+	// wsWatchdogDead 静默判死阈值 35s（Java:46 HEARTBEAT_WATCHDOG_MS=35000L：
+	// 半开连接只有靠"多久没收到任何帧"才能判死；服务端 30s 一次 ping，35s 留余量，
+	// 最坏 35~45s 发现并切回 HTTP 兜底）。
+	wsWatchdogDead = 35 * time.Second
+	// wsWatchdogCheckEvery 看门狗检查粒度 10s（Java:109 scheduleAtFixedRate(…, 10, 10, SECONDS)）。
+	wsWatchdogCheckEvery = 10 * time.Second
+	// wsClientPingEvery 本端主动空 ping 帧间隔 15s（Java:49 CLIENT_PING_INTERVAL_SEC=15L，
+	// :118-136 clientPing()——原生 WebSocket ping 控制帧，不是文本帧；失败即判死触发重连）。
+	wsClientPingEvery = 15 * time.Second
+	// wsConnectTimeout 单次连接尝试超时 3s（Java:51 CONNECT_TIMEOUT_MS=3000L）。
+	wsConnectTimeout = 3 * time.Second
 )
+
+// wsBackoffSteps 连接不可用退避三档 10s/30s/60s（Java:38 BACKOFF_STEPS={10000,30000,60000}，
+// markUnavailable :333-338：退避窗口内 canUse()=false，调用方逐请求回落 HTTP）。
+var wsBackoffSteps = []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second}
 
 // session 单个房间会话：心跳循环 + 信令循环，直到 stop 或致命错误。
 type session struct {
@@ -46,6 +63,19 @@ type session struct {
 	wsMu      sync.Mutex
 	wsConn    *websocket.Conn
 	wsPending map[int64]chan *wsFrame
+
+	// ---- 传输硬化状态（SignalingWsTransport.java 对应字段） ----
+	// wsLastFrameAt 最近一次"收到任何帧"的时刻（Java:86 lastFrameAt；
+	// onText :522 与 pong 到达即 Ping() 成功都刷新它——对应 Java onPing/onPong H10 注释 :533-544）。
+	wsLastFrameAt atomic.Int64
+	// wsNextRetryAt 退避窗口：早于此刻禁止再次拨号/用 WS（Java:84 nextRetryAt，canUse() :185-187）。
+	wsNextRetryAt atomic.Int64
+	// wsBackoffStep 退避档位游标，拨号成功清零（Java:85 backoffStep，onConnected :346）。
+	wsBackoffStep atomic.Int64
+	// wsDead 当前连接的判死信号（看门狗/主动 ping 失败/写失败关闭它 → wsLoop 立即返回触发重连）。
+	wsDead chan struct{}
+	// wsKill 关闭 wsDead（幂等，每连接一个 sync.Once）。
+	wsKill func()
 }
 
 func newSession(app *App, code, token string, isHost bool) *session {
@@ -219,7 +249,10 @@ func (s *session) heartbeatLoop() {
 
 // ---- 信令循环 ----
 
-// signalLoop WS 优先；失败回退 HTTP 轮询，最多 30s 后重试 WS。
+// signalLoop WS 优先；失败回退 HTTP 轮询。重连时刻按退避窗口决定：
+// 对齐 SignalingWsTransport.java runReconnect :402-409（失败 → markUnavailable →
+// 延迟 max(1000ms, nextRetryAt-now) 再试；断开事件则立即重连 delay=0），
+// 等待窗口内以 HTTP 逐请求兜底（等价 Java canUse()=false 时 SignalingClient 直落 HTTP）。
 func (s *session) signalLoop() {
 	s.since.Store(time.Now().UnixMilli() - 30_000)
 
@@ -233,10 +266,64 @@ func (s *session) signalLoop() {
 		if s.isDone() {
 			return
 		}
-		if s.httpPollLoop(wsRetryWait) {
-			return // 会话已结束
+		if wait := s.wsNextRetryDelay(); wait > 0 {
+			if s.httpPollLoop(wait) {
+				return // 会话已结束
+			}
 		}
-		s.app.netLog("info", "尝试重连 WebSocket...")
+		if s.isDone() {
+			return
+		}
+		s.app.netLog("info", "ws_reconnect_attempt")
+	}
+}
+
+// wsNextRetryDelay 距退避窗口打开还需等待的时间；0 表示可立即重连
+// （Java:379 onDisconnected → scheduleReconnect(0)；:407 失败续试 max(1000ms, 剩余)）。
+func (s *session) wsNextRetryDelay() time.Duration {
+	next := s.wsNextRetryAt.Load()
+	if next == 0 {
+		return 0
+	}
+	remaining := next - time.Now().UnixMilli()
+	if remaining <= 0 {
+		return 0
+	}
+	delay := time.Duration(remaining) * time.Millisecond
+	if delay < time.Second {
+		delay = time.Second
+	}
+	return delay
+}
+
+// wsCanUse 是否可尝试使用 WS：不在退避冷却窗口内（Java:184-187 canUse()）。
+func (s *session) wsCanUse() bool {
+	return time.Now().UnixMilli() >= s.wsNextRetryAt.Load()
+}
+
+// wsMarkUnavailable 标记连接不可用并进入下一档退避（Java:333-338 markUnavailable()：
+// step 递增、delay=BACKOFF_STEPS[min(step,2)]、nextRetryAt=now+delay；连接成功后清零
+// onConnected :340-347）。reason 为日志标识（i18n-neutral 键，不承载用户文案）。
+func (s *session) wsMarkUnavailable(reason string) {
+	step := s.wsBackoffStep.Add(1) - 1
+	idx := int(step)
+	if idx >= len(wsBackoffSteps) {
+		idx = len(wsBackoffSteps) - 1
+	}
+	delay := wsBackoffSteps[idx]
+	s.wsNextRetryAt.Store(time.Now().UnixMilli() + delay.Milliseconds())
+	s.app.netLog("warn", fmt.Sprintf("ws_backoff step=%d delay_ms=%d reason=%s", idx+1, delay.Milliseconds(), reason))
+}
+
+// wsKillNow 判定当前连接死亡：关闭 wsDead，让 wsLoop 与全部在途 wsSend 立即返回
+// （Java:364-380 onDisconnected——在途请求以网络错误完成、由上层降级 HTTP，
+// 随后主动重连）。
+func (s *session) wsKillNow() {
+	s.wsMu.Lock()
+	kill := s.wsKill
+	s.wsMu.Unlock()
+	if kill != nil {
+		kill()
 	}
 }
 
@@ -319,6 +406,9 @@ func (s *session) handleSignals(sd signalsData) {
 		})
 		// 连接引擎按 type 分发（只处理引擎关心的类型）
 		s.app.engine.onSignal(sig.Type, sig.From, data)
+		// 模组同步：mods_request 要现算/回传清单（可能几十秒），必须离开信令分发线程
+		// ——与模组把 bind/allocate 丢给 TURN_BG_EXECUTOR 是同一条教训（审计 P1-2）。
+		s.app.modSyncHandleSignalAsync(sig.Type, sig.From, data)
 	}
 	if sd.TS > maxTs {
 		maxTs = sd.TS
@@ -335,9 +425,11 @@ type wsRequest struct {
 	Body   any    `json:"body"`
 }
 
-// wsFrame 服务器帧：响应帧带 id/success/data；主动推送帧 id=0 且 push="signals"。
+// wsFrame 服务器帧：响应帧带 id/success/data；主动推送帧 id=0 且带 push 字段
+// （Java handleFrame :418-439——无 id 字段的帧按 -1 处理、不入推送也不匹配 pending，
+// 故 ID 用指针区分"缺省"与"0"）。
 type wsFrame struct {
-	ID      int64           `json:"id"`
+	ID      *int64          `json:"id"`
 	Push    string          `json:"push"`
 	Success bool            `json:"success"`
 	Error   string          `json:"error"`
@@ -370,11 +462,16 @@ func wsURLFrom(baseURL string) string {
 	return u + "/ws"
 }
 
-// wsSend 在 WS 已连接时发送一个帧请求并等待响应；WS 未连接返回 ok=false（调用方回退 HTTP）。
+// wsSend 在 WS 已连接且不在退避窗口时发送一个帧请求并等待响应；
+// 不可用/失败返回 ok=false（调用方回退 HTTP 逐请求兜底，对齐 Java canUse 语义）。
 func (s *session) wsSend(route string, body any) (*wsFrame, bool) {
+	if !s.wsCanUse() {
+		return nil, false
+	}
 	s.wsMu.Lock()
 	conn := s.wsConn
-	if conn == nil || s.wsPending == nil {
+	dead := s.wsDead
+	if conn == nil || s.wsPending == nil || dead == nil {
 		s.wsMu.Unlock()
 		return nil, false
 	}
@@ -383,39 +480,63 @@ func (s *session) wsSend(route string, body any) (*wsFrame, bool) {
 	s.wsPending[id] = ch
 	s.wsMu.Unlock()
 
+	dropPending := func() {
+		s.wsMu.Lock()
+		if s.wsPending != nil {
+			delete(s.wsPending, id)
+		}
+		s.wsMu.Unlock()
+	}
+
 	payload, err := json.Marshal(wsRequest{ID: id, Route: route, Method: "POST", Body: body})
 	if err != nil {
-		s.wsMu.Lock()
-		delete(s.wsPending, id)
-		s.wsMu.Unlock()
+		dropPending()
 		return nil, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wsResponseTimeout)
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
-		s.wsMu.Lock()
-		delete(s.wsPending, id)
-		s.wsMu.Unlock()
+		// 发送失败 → 判死并立即触发重连（Java sendFrame :273-280 写失败完成异常 +
+		// pendingFut.whenComplete :245-255 markUnavailable；onDisconnected :379 重连 delay=0）。
+		dropPending()
+		s.wsMarkUnavailable("send")
+		s.wsKillNow()
 		return nil, false
 	}
 	select {
 	case f := <-ch:
 		return f, true
 	case <-time.After(wsResponseTimeout):
-		s.wsMu.Lock()
-		delete(s.wsPending, id)
-		s.wsMu.Unlock()
+		// 请求超时 → markUnavailable：避免后续请求继续对着半开连接逐个等超时
+		// （Java:245-255 注释语义）。
+		dropPending()
+		s.wsMarkUnavailable("timeout")
+		return nil, false
+	case <-dead:
+		// 连接判死：在途请求即刻失败（Java:364-380），本端以 reason 归入退避。
+		dropPending()
+		s.wsMarkUnavailable("disconnected")
 		return nil, false
 	case <-s.done:
+		dropPending()
 		return nil, false
 	case <-s.stopCh:
+		dropPending()
 		return nil, false
 	}
 }
 
-// wsLoop 维持一次 WebSocket 连接；推送帧实时分发，帧轮询降为 5s 安全网，
+// wsLoop 维持一次 WebSocket 连接：推送帧实时分发，帧轮询降为 5s 安全网，
 // 同一连接同时承载心跳等带 ID 的帧请求（wsSend）。
-// 返回错误表示连接失效，由上层回退 HTTP 轮询。
+// 传输硬化整体移植 network/SignalingWsTransport.java：
+//   - 半开判死 35s + 检查粒度 10s（:46 HEARTBEAT_WATCHDOG_MS、:109 scheduleAtFixedRate 10s、
+//     :450-465 heartbeatWatchdog）
+//   - 每 15s 主动空 ping 控制帧，失败即判死触发重连（:49、:118-136 clientPing）
+//   - 拨号成功清零退避（:340-347 onConnected）、拨号/请求失败进 10s/30s/60s 退避
+//     （:38、:333-338 markUnavailable，窗口内 canUse=false 调用方逐请求回落 HTTP）
+//   - 握手必带 X-VoxLink-Version 头（:302-307，1.2.0 互通实测修复）
+//
+// 返回错误表示连接失效，由上层回退 HTTP 轮询并按退避窗口重连。
 func (s *session) wsLoop() error {
 	wsURL := wsURLFrom(s.app.baseURL())
 
@@ -431,58 +552,146 @@ func (s *session) wsLoop() error {
 		}
 	}()
 
-	dialCtx, dialCancel := context.WithTimeout(ctx, httpTimeout)
+	dialCtx, dialCancel := context.WithTimeout(ctx, wsConnectTimeout)
 	hdr := http.Header{}
 	hdr.Set("User-Agent", httpUserAgent)
+	// 版本头必须随 WS 握手带上（Java:303-306 注释原文要义）：服务端把 WS 帧按握手
+	// 请求头克隆后内部分发，/room/list 的 HL 展示闸与 /room/join 的 allowHostPeers
+	// 都读这个头；缺了即按旧端处理，HL 房在 WS 模式下永远不可见（fed 互通功能依赖）。
+	hdr.Set("X-VoxLink-Version", appVersion)
 	conn, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{HTTPHeader: hdr})
 	dialCancel()
 	if err != nil {
+		// 连接失败 → markUnavailable 进入退避，上层降级 HTTP
+		// （Java request():211-215 与 runReconnect():402-409 同口径）。
+		s.wsMarkUnavailable("dial")
 		return fmt.Errorf("连接失败: %w", err)
 	}
 	conn.SetReadLimit(1 << 20)
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
+	// 每连接独立判死信号（wsLoop 串行运行，绑定/摘除无需再判并发连接）。
+	dead := make(chan struct{})
+	var killOnce sync.Once
+	kill := func() { killOnce.Do(func() { close(dead) }) }
+
 	s.wsMu.Lock()
 	s.wsConn = conn
 	s.wsPending = make(map[int64]chan *wsFrame)
+	s.wsDead = dead
+	s.wsKill = kill
 	s.wsMu.Unlock()
+	// onConnected（Java:340-347）：刷新收帧锚点、重置退避两态。
+	s.wsLastFrameAt.Store(time.Now().UnixMilli())
+	s.wsBackoffStep.Store(0)
+	s.wsNextRetryAt.Store(0)
 	s.app.netLog("info", "WebSocket 已连接")
 
-	defer func() { // 断开后摘除连接，挂起的 wsSend 由超时兜底回退 HTTP
+	defer func() { // 断开后先广播判死（在途 wsSend 立即失败回落 HTTP，Java:364-380），再摘除连接
+		kill()
 		s.wsMu.Lock()
-		s.wsConn = nil
-		s.wsPending = nil
+		if s.wsConn == conn {
+			s.wsConn = nil
+			s.wsPending = nil
+			s.wsDead = nil
+			s.wsKill = nil
+		}
 		s.wsMu.Unlock()
 	}()
 
 	// 读 goroutine：推送帧直接分发，响应帧按 ID 回填 pending。
+	// 任何收到的数据帧都刷新看门狗锚点（Java onText :521-522 lastFrameAt）。
 	go func() {
 		for {
 			_, data, err := conn.Read(ctx)
 			if err != nil {
+				kill() // 读失败=连接死亡（Java onError/onClose :546-556 → onDisconnected）
 				return
 			}
+			s.wsLastFrameAt.Store(time.Now().UnixMilli())
 			var f wsFrame
 			if json.Unmarshal(data, &f) != nil {
 				continue
 			}
-			if f.Push != "" || f.ID == 0 {
+			id := int64(-1)
+			if f.ID != nil {
+				id = *f.ID
+			}
+			// 服务端主动推送帧：id==0 且带 push 字段（Java:418-439）。
+			// lobby 推送是模组大厅 UI 的刷新事件（LobbyPush），本 App 大厅列表走轮询、
+			// 无对应消费者，等价忽略。
+			if id == 0 && f.Push != "" {
 				var sd signalsData
 				if json.Unmarshal(f.Data, &sd) == nil {
 					s.handleSignals(sd)
 				}
 				continue
 			}
+			if id < 0 {
+				continue // 无 id 帧：Java 按 -1 查 pending 不命中后丢弃（:418、:440-444）
+			}
 			s.wsMu.Lock()
-			ch, ok := s.wsPending[f.ID]
+			ch, ok := s.wsPending[id]
 			if ok {
-				delete(s.wsPending, f.ID)
+				delete(s.wsPending, id)
 			}
 			s.wsMu.Unlock()
 			if ok {
 				select {
 				case ch <- &f:
 				default:
+				}
+			}
+		}
+	}()
+
+	// 主动心跳 ping（Java:118-136 clientPing）：发送原生 WebSocket ping 控制帧——
+	// coder/websocket 的 Conn.Ping 走 writeControl(opPing)（conn.go:223→c.ping→
+	// writeControl），是协议层控制帧而非文本帧；半开连接下数据写仍会"成功"，
+	// 只有主动 ping 收不到 pong 才能暴露。失败即判死、触发重连。
+	// pong 到达计入看门狗锚点（H10，Java:533-544：协议层 ping/pong 也要计入心跳，
+	// 否则仅有 keepalive 的健康连接会被误杀；库内部自动应答服务端 ping，
+	// 调用侧以 Ping() 成功为"收到 pong"的等价信号）。
+	go func() {
+		t := time.NewTicker(wsClientPingEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-dead:
+				return
+			case <-t.C:
+				pctx, pcancel := context.WithTimeout(ctx, wsResponseTimeout)
+				pingErr := conn.Ping(pctx)
+				pcancel()
+				if pingErr != nil {
+					s.app.netLog("warn", "ws_ping_failed err="+pingErr.Error())
+					kill()
+					return
+				}
+				s.wsLastFrameAt.Store(time.Now().UnixMilli())
+			}
+		}
+	}()
+
+	// 心跳看门狗（Java:450-465）：每 10s 检查一次，静默超 35s 判死。半开连接
+	// （对端进程消失/NAT 映射失效但没发 FIN）下 socket 仍"可写"，只有"多久没收到
+	// 任何帧"可靠；最坏 35~45s 内发现并切回 HTTP 兜底。
+	go func() {
+		t := time.NewTicker(wsWatchdogCheckEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-dead:
+				return
+			case <-t.C:
+				if time.Now().UnixMilli()-s.wsLastFrameAt.Load() > wsWatchdogDead.Milliseconds() {
+					s.app.netLog("warn", "ws_watchdog_dead")
+					kill()
+					return
 				}
 			}
 		}
@@ -497,6 +706,10 @@ func (s *session) wsLoop() error {
 			return errors.New("会话已结束")
 		case <-s.stopCh:
 			return errors.New("会话已停止")
+		case <-dead:
+			// 看门狗/主动 ping/读错误任一判死 → 立即返回，上层按退避窗口重连
+			// （Java onDisconnected → scheduleReconnect(0)：主动立即重连）。
+			return errors.New("ws_dead")
 		case <-ticker.C:
 		}
 

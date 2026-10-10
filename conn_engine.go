@@ -78,6 +78,7 @@ func (e *connEngine) notifyState(phase, status, address, detail string) {
 type hostPeer struct {
 	id              string
 	caps            []string // join_request 携带的加入者能力表
+	protoVersion    int      // join_request 携带的 clientProtocolVersion，0=旧版（RoomInfo.java:243-245 的 legacy 判据）
 	natClass        natClass // punch_info 上报的加入者 NAT 分级
 	joinerPortRange int      // punch_info 上报的加入者预测范围（反向打洞用）
 	puncher         *puncher
@@ -191,8 +192,11 @@ func (e *connEngine) bindSession(s *session, clientID string) {
 
 	e.app.netLog("info", fmt.Sprintf("连接引擎就绪（role=%s）", roleStr(isHost)))
 	if !isHost {
-		// JoinRoom 成功自动开始 p2p
-		e.notifyState(phaseP2P, statusTrying, "", "")
+		// 互通房（source=happylink）不打洞、不走中继：由 connectFedIfHappyLink 播 fed/trying，
+		// 这里再播 p2p/trying 会让前端先闪一个"正在打洞"的假阶段（ConnectionManager.connectFed 语义）。
+		if !roomIsHappyLink(e.app.snapshotRoom()) {
+			e.notifyState(phaseP2P, statusTrying, "", "")
+		}
 	}
 }
 
@@ -452,7 +456,7 @@ func (e *connEngine) onSignal(typ, from string, data map[string]any) {
 		}
 	case "relay_accept":
 		if e.roleIsHost() {
-			e.hostOnRelayAccept(data)
+			e.hostOnRelayAccept(from, data)
 		} else {
 			e.app.netLog("info", "中继节点已接受")
 		}
@@ -1013,6 +1017,8 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 				rc.setAuthKey(authKey, true)
 			}
 			rc.setOnRestart(func() { e.guestIceRestart() })
+			// 玩家中继 v2：双方都声明 relayMuxV1 才 mux 化，且必须在 Start 之前（模组 RUDP:160）。
+			setupRelayMux(rc, hostSupportsCap(e.app.snapshotRoom(), relayMuxCapability), e.app.netLog, "guest", "joiner")
 			rc.Start()
 			_, bridge, berr := startGuestBridge(rc, func() { e.guestBridgeDown() })
 			if berr != nil {
@@ -1333,7 +1339,12 @@ func (e *connEngine) hostOnJoinRequest(from string, data map[string]any) {
 			}
 		}
 	}
-	peer := &hostPeer{id: from, caps: caps}
+	proto := sigInt(data, "clientProtocolVersion")
+	if peerDataIsLegacy(data) {
+		// 老客户端（无 protocolVersion 或 caps 空）一律按 legacy 处理，不做任何 v2/stdTurn 强求
+		e.app.netLog("info", "join_request 来自旧版客户端（legacy）")
+	}
+	peer := &hostPeer{id: from, caps: caps, protoVersion: proto}
 	e.hPeers[from] = peer
 	hostPort := e.hostPort
 	e.mu.Unlock()
@@ -1560,6 +1571,8 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 				e.app.netLog("warn", "host 侧收到 ICE 重启请求，重新协商该房客")
 				e.hostRestartPeer(peer.id)
 			})
+			// 玩家中继 v2：房主侧也要 mux 化，否则这个房客无法把别人中继出去（caps 在建 peer 时定，不再变）。
+			setupRelayMux(rc, peerCapsListContains(peer.caps, relayMuxCapability), e.app.netLog, peer.id, "host")
 			rc.Start()
 			e.mu.Lock()
 			cur := e.hPeers[peer.id]
@@ -1620,8 +1633,10 @@ func (e *connEngine) hostRestartPeer(peerID string) {
 	p := e.hPeers[peerID]
 	delete(e.hPeers, peerID)
 	var caps []string
+	proto := 0
 	if p != nil {
 		caps = p.caps
+		proto = p.protoVersion
 	}
 	e.mu.Unlock()
 	if p != nil {
@@ -1633,7 +1648,13 @@ func (e *connEngine) hostRestartPeer(peerID string) {
 		}
 	}
 	if caps != nil || p != nil {
-		e.hostOnJoinRequest(peerID, map[string]any{"clientId": peerID, "clientCapabilities": toAnySlice(caps)})
+		// 重放必须带上 clientProtocolVersion，否则一次 ICE 重启就把新版房客降级成 legacy，
+		// 后续 mux/stdTurn 判定全按老客户端走（RoomInfo.java:243-245）。
+		e.hostOnJoinRequest(peerID, map[string]any{
+			"clientId":              peerID,
+			"clientCapabilities":    toAnySlice(caps),
+			"clientProtocolVersion": proto,
+		})
 	}
 }
 
