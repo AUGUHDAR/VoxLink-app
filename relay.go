@@ -62,6 +62,11 @@ func (e *connEngine) usePlayerRelay() error {
 	if sess == nil {
 		return fmt.Errorf("当前没有房间会话")
 	}
+	// 与模组同一道门：relayEnabled 关掉时"用别人的中继"整条路直接退出
+	// （CM:10520-10526 用 connection.relay_unavailable），自动编排器也就拿不到玩家中继这一道。
+	if !e.app.relayEnabled() {
+		return fmt.Errorf("中继已在设置中关闭")
+	}
 	if isHost {
 		return fmt.Errorf("房主无需玩家中继")
 	}
@@ -164,7 +169,9 @@ func (e *connEngine) guestRelayFail(attempt int64, reason string) {
 		_ = sock.Close()
 	}
 	e.app.netLog("warn", "玩家中继失败: "+reason)
-	e.notifyState(phasePrelay, statusFailed, "", reason)
+	// 1.2.0 起这里不再是失败终点：自动模式交给编排器换道/复活打洞，只有非自动（旧版对端触发等
+	// 手动语义）才落失败（模组 relayFailOrAuto 替换了全部直接 showConnectFailed 的中继失败位点）。
+	e.relayFailOrAuto(keyAutoRelayFailed, reason)
 }
 
 // guestOnRelayNotify 收到房主的 relay_notify（两种形态分派）。
@@ -263,6 +270,14 @@ func (e *connEngine) relayPunchFlow(attempt int64, relayIP string, relayPort int
 	}
 
 	rc := newRudp(sock, actual)
+	// 载具热切（模组 startUdpPunchBridge 第一分支）：旧道被 25s 验证窗判死时，玩家中继这条新
+	// 承载不新建本地桥，只换承载。swapJoinerCarrier 内部会 start()，所以必须抢在 rc.Start() 之前。
+	if e.tryCarrierSwap(rc) {
+		if !reused {
+			_ = sock.Close()
+		}
+		return
+	}
 	rc.Start()
 	local, bridge, berr := startGuestBridge(rc, func() { e.relayBridgeDown() })
 	if berr != nil {
@@ -290,6 +305,10 @@ func (e *connEngine) relayPunchFlow(attempt int64, relayIP string, relayPort int
 	e.mu.Unlock()
 
 	e.app.netLog("info", "中继隧道建立")
+	// 中继模式：起连接期上行记账（换道重放用）+ 25s 真连接验证窗（CM:14986-14989）。
+	// turnPath 传 false——本道是玩家中继，验证通过后还要起 10 分钟后台直连探测。
+	startJoinerJournal()
+	e.armRelayVerifyWatchdog(false)
 	e.relaySuccess(attempt, local)
 }
 
@@ -489,6 +508,12 @@ func allocateRelayMuxChan() int {
 // guestOnRelaySetup 收到 relay_setup：与 target 打洞，把被中继会话接到本端 joiner 传输的
 // mux 子通道上（v2 数据面），再回 relay_accept{forClientId, chan}。
 func (e *connEngine) guestOnRelaySetup(from string, data map[string]any) {
+	// 同一个开关的另一半语义：关掉后不为别人中继（模组 relayOk 判据，CM:2026/:7596/:11457 一系）。
+	if !e.app.relayEnabled() {
+		e.app.netLog("info", "中继开关已关闭，婉拒 relay_setup")
+		_ = e.sendSignal("relay_declined", map[string]any{}, "host")
+		return
+	}
 	targetClientID := sigStr(data, "targetClientId")
 	targetIP := sigStr(data, "targetIp")
 	targetPort := sigInt(data, "targetPort")

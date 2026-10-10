@@ -16,14 +16,31 @@ type appSettings struct {
 	// ClientTag 启动器/用户来源标记（如 kamucl），随 create 上报服务端供后台展示
 	// （server-go/roommanager.go:409-413 同款校验）；默认空 = 不上报。
 	ClientTag string `json:"clientTag"`
+	// RelayEnabled 与模组 VoxLinkConfig.relayEnabled 同一个开关、同一个默认值 true（:41/:64/:92）。
+	// 一个开关管两件事："为别人中继"与"用别人的中继"（模组 tryRelay 在关闭时以
+	// connection.relay_unavailable 直接退出，CM:10520-10526），它不管 TURN（fireAutoTurn 无此判，CM:12830-12837）。
+	// 用 *bool 是为了区分"老配置文件没这一项"（nil→按默认 true）与用户显式关掉。
+	RelayEnabled *bool `json:"relayEnabled"`
 }
 
 func defaultSettings() appSettings {
+	on := true
 	return appSettings{
-		ServerURL: defaultServerURL,
-		Theme:     "light",
-		ClientTag: "",
+		ServerURL:    defaultServerURL,
+		Theme:        "light",
+		ClientTag:    "",
+		RelayEnabled: &on,
 	}
+}
+
+// relayEnabled 当前中继开关（nil 表示历史配置没这一项，按模组默认 true）。
+func (a *App) relayEnabled() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.settings.RelayEnabled == nil {
+		return true
+	}
+	return *a.settings.RelayEnabled
 }
 
 // defaultSettingsPath 返回设置文件路径（基于 os.UserConfigDir，Windows 即 %APPDATA%）。

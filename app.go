@@ -399,10 +399,11 @@ func (a *App) GetSettings() string {
 	clientTag := a.settings.ClientTag
 	a.mu.Unlock()
 	return wrapOK(map[string]any{
-		"serverUrl": defaultServerURL,
-		"theme":     theme,
-		"version":   appVersion,
-		"clientTag": clientTag,
+		"serverUrl":    defaultServerURL,
+		"theme":        theme,
+		"version":      appVersion,
+		"clientTag":    clientTag,
+		"relayEnabled": a.relayEnabled(),
 	})
 }
 
@@ -411,9 +412,10 @@ func (a *App) GetSettings() string {
 // （小写+trim，不匹配 ^[a-z0-9_-]{1,32}$ 一律丢空，对齐 server-go/roommanager.go:410-413 的"丢弃不拒绝"）。
 func (a *App) SaveSettings(settingsJSON string) string {
 	var req struct {
-		ServerURL string  `json:"serverUrl"` // 忽略（收到也不应用）
-		Theme     string  `json:"theme"`
-		ClientTag *string `json:"clientTag"`
+		ServerURL    string  `json:"serverUrl"` // 忽略（收到也不应用）
+		Theme        string  `json:"theme"`
+		ClientTag    *string `json:"clientTag"`
+		RelayEnabled *bool   `json:"relayEnabled"`
 	}
 	if err := parseParams(settingsJSON, &req); err != nil {
 		return wrapErr("INVALID_PARAMS", err.Error())
@@ -425,6 +427,9 @@ func (a *App) SaveSettings(settingsJSON string) string {
 	}
 	if req.ClientTag != nil {
 		a.settings.ClientTag = normalizeClientTag(*req.ClientTag)
+	}
+	if req.RelayEnabled != nil {
+		a.settings.RelayEnabled = req.RelayEnabled
 	}
 	a.mu.Unlock()
 
@@ -942,27 +947,7 @@ func (a *App) DetectMcPorts() string {
 	return wrapOK(map[string]any{"ports": ports})
 }
 
-// TryDirect 直连探测（TCP hostIp:hostPort，3 次尝试）。结果经 conn:state 事件推送。
-func (a *App) TryDirect() string {
-	if err := a.engine.tryDirect(); err != nil {
-		return wrapErr("NO_SESSION", err.Error())
-	}
-	return wrapOK(map[string]any{})
-}
-
-// UsePlayerRelay 请求玩家中继。结果经 conn:state 事件推送。
-func (a *App) UsePlayerRelay() string {
-	if err := a.engine.usePlayerRelay(); err != nil {
-		return wrapErr("INVALID_STATE", err.Error())
-	}
-	return wrapOK(map[string]any{})
-}
-
-// UseTurnRelay 请求 TURN 中继（节点中继，自定义协议 v1 / 标准 RFC 5766 自动协商）。
-// 结果经 conn:state 事件推送（phase=turn）。仅房客可用。
-func (a *App) UseTurnRelay() string {
-	if err := a.engine.useTurnRelay(); err != nil {
-		return wrapErr("INVALID_STATE", err.Error())
-	}
-	return wrapOK(map[string]any{})
-}
+// 2026-10-05 对齐模组 1.2.0：手动中继按钮退役——直连/玩家中继/TURN 一律由引擎侧
+// 智能自动编排器触发。原先的 UI 绑定方法 TryDirect / UsePlayerRelay / UseTurnRelay
+// 已随前端连接卡一起去掉调用方后删除；引擎本体 tryDirect() / usePlayerRelay() /
+// useTurnRelay() 保留（编排器需要），见 conn_engine.go / relay.go / turn_flow.go。

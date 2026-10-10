@@ -47,7 +47,7 @@ When direct punching fails, VoxLink doesn't just give up — and since **1.2.0**
 - **Peer relay** — a suitable Cone-NAT player currently online in the lobby forwards your packets. This traffic **never touches the server**, and the relay player barely notices.
 - **Seamless lane change** — a relay that came up but is quietly dead gets detected within seconds and swapped, without dropping the bytes you already sent. After that it goes back to punching.
 
-The app keeps trying to upgrade you to a direct P2P path in the background; when it succeeds, the switch is smooth and you keep playing. Relay usage can be switched off in settings — off means you won't relay for others either. Fair enough right?
+The app keeps trying to upgrade you to a direct P2P path in the background; when it succeeds, the switch is smooth and you keep playing. There is one switch in settings — **peer relay**: off means you won't relay for others and you can't use anyone else's either (TURN relay is unaffected). Fair enough right?
 
 ## Rooms
 
@@ -126,7 +126,7 @@ VoxLink 的独立桌面客户端，**不需要装模组**。它为模组覆盖�
 - **玩家中继** — 从当前在线的公开大厅玩家里挑一个网络条件合适的 Cone-NAT 玩家做转发节点。这条流量 **绝不经过服务器**，中继的玩家本身几乎无感知。
 - **无缝换道** — 中继建起来了但其实已经死了的，几秒内会被发现并立刻换到另一条道，已经发出去的数据不丢。两条道都用不了就回头继续打洞。
 
-连上之后应用端还会在后台继续尝试升级成直连，成功了就平滑切换，你这边不用重连。中继可以在设置里关掉，关了就不为别人中继、也用不了别人的，挺公平。
+连上之后应用端还会在后台继续尝试升级成直连，成功了就平滑切换，你这边不用重连。设置里有一个"玩家中继"开关，管两头：关了就不为别人中继、也用不了别人的中继，挺公平（TURN 兜底不受它影响，仍然自动）。
 
 ## 房间
 

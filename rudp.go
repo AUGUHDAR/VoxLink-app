@@ -438,6 +438,21 @@ func (c *rudpConn) Start() {
 // IsConnected 连接是否存活。
 func (c *rudpConn) IsConnected() bool { return !c.closed.Load() }
 
+// isConnected 对齐模组 ReliableUdpTransport.isConnected(434-436: connected && running)：
+// 已 start 且未关闭。载具热切的排干判据（PB:1021-1023、PB:1036-1038）用的是这一语义——
+// 未 start 的载具 connected 位没置起，不排干；与导出 IsConnected 的差别即 started 这一半。
+func (c *rudpConn) isConnected() bool { return c.started.Load() && !c.closed.Load() }
+
+// hasPendingOutbound 对齐模组 ReliableUdpTransport.hasPendingOutbound(438-441)：
+// 出口是否还有未被确认的数据（含积压重传队列，pendingAcks 的 Go 形态即 pending）。
+// 救援队列不计：模组里救援包已离开 pendingAcks（黑名单 #10"不入 pending"），
+// 熔断开路后的慢速重传不该把换道排干堵死。
+func (c *rudpConn) hasPendingOutbound() bool {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	return len(c.pending) > 0
+}
+
 // RemoteAddr 当前发送目标（可能已随对端漂移更新）。
 func (c *rudpConn) RemoteAddr() *net.UDPAddr { return c.remote.Load() }
 

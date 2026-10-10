@@ -200,6 +200,9 @@ func (e *connEngine) startStdTurnKeepalive(s *stdTurnSession) {
 // teardownTurn 全量拆除 TURN（失败/断线/会话结束共用）。
 func (e *connEngine) teardownTurn(notifyFail bool) {
 	e.mu.Lock()
+	// F7 会话纪元：每次拆 +1。异步链（cred/allocate/bind）出发时抓取纪元、写回时比对，
+	// 单靠 turnInFlight 判不出来——35s 总预算复位过一轮再重新置 true，晚到的旧会话照样写得进。
+	e.turnSessionEpoch++
 	s := e.turnSession
 	std := e.stdTurnSession
 	tr := e.turnTransport
@@ -228,8 +231,34 @@ func (e *connEngine) teardownTurn(notifyFail bool) {
 		_ = tr.Close()
 	}
 	if notifyFail && !isHost {
-		e.notifyState(phaseTurn, statusFailed, "", "TURN 中继建立失败")
+		// 统一失败口：自动模式下不弹失败屏，交编排器换道/复活打洞（模组 teardownTurn 的 failKey 语义）。
+		e.relayFailOrAuto(keyAutoTurnFailed, "TURN 中继建立失败")
 	}
+}
+
+// turnEpochNow 抓取当前 TURN 会话纪元，供异步链在写回前比对（F7）。
+func (e *connEngine) turnEpochNow() int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.turnSessionEpoch
+}
+
+// turnWriteBackAllowed 异步 TURN 链的写回屏障：
+//   - 纪元变了 → 期间已被拆过一次（含 35s 总预算的 teardown），这条晚到的隧道是孤儿，丢弃；
+//   - 房客侧还要求 turnInFlight 仍为真（模组同一条判据）；
+//   - 会话已没了 → 直接丢弃。
+//
+// 光靠 turnInFlight 判不住：它是布尔位，拆掉后新一轮会重新置 true，旧链晚到时看不出"已经不是那一轮"。
+func (e *connEngine) turnWriteBackAllowed(epoch int64, needInFlight bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.turnSessionEpoch != epoch || e.sess == nil {
+		return false
+	}
+	if needInFlight && !e.turnInFlight {
+		return false
+	}
+	return true
 }
 
 // sendTurnNack host → guest 拒绝/失败回执。
@@ -319,6 +348,7 @@ func (e *connEngine) turnReady() bool {
 
 // turnV1GuestFlow 自定义协议 v1（:37000 BIND/DATA）。
 func (e *connEngine) turnV1GuestFlow(node turnNodeInfo, code, token, clientID string, room map[string]any) {
+	epoch := e.turnEpochNow() // F7：本轮异步链的凭证，写回时比对
 	e.app.netLog("info", "TURN 中继：正在分配会话…")
 	alloc, err := turnAllocate(e.app, code, clientID, token, node.ID)
 	if err != nil {
@@ -346,8 +376,8 @@ func (e *connEngine) turnV1GuestFlow(node turnNodeInfo, code, token, clientID st
 		e.teardownTurn(true)
 		return
 	}
-	// 写回屏障：总预算超时的 teardown 已把 turnInFlight 置 false 时中止
-	if !e.turnStillInFlight() {
+	// 写回屏障（F7）：总预算超时的 teardown 已把 turnInFlight 置 false，或期间已换新纪元时中止
+	if !e.turnWriteBackAllowed(epoch, true) {
 		session.unbind()
 		e.app.netLog("warn", "TURN 流程在 bind 期间被取消，丢弃会话")
 		return
@@ -399,6 +429,7 @@ func (e *connEngine) turnV1GuestFlow(node turnNodeInfo, code, token, clientID st
 // stdTurnGuestFlow 标准 TURN guest（RFC 5766）：签 cred → Allocate → 发 turn_alloc
 // （带本端 relay 地址）→ 等 host turn_ready（handleStdTurnReady 里 ChannelBind+桥接）。
 func (e *connEngine) stdTurnGuestFlow(node turnNodeInfo, code, token, clientID string) {
+	epoch := e.turnEpochNow() // F7：本轮异步链的凭证
 	e.app.netLog("info", "标准 TURN：正在签发凭证…")
 	cred := stdTurnFetchCred(e.app, code, clientID, token, node.ID)
 	if cred == nil {
@@ -416,7 +447,7 @@ func (e *connEngine) stdTurnGuestFlow(node turnNodeInfo, code, token, clientID s
 		e.teardownTurn(true)
 		return
 	}
-	if !e.turnStillInFlight() {
+	if !e.turnWriteBackAllowed(epoch, true) {
 		stdTurnClose(session)
 		e.app.netLog("warn", "标准 TURN 流程在 allocate 期间被取消，丢弃会话")
 		return
@@ -501,6 +532,7 @@ func (e *connEngine) hostOnTurnAlloc(from string, data map[string]any) {
 	e.mu.Unlock()
 
 	sessionIDHex := sigStr(data, "sessionId")
+	epoch := e.turnEpochNow() // F7：host 侧异步链（allocate+BIND 可达十几秒）的写回凭证
 	host := sigStr(data, "host")
 	port := sigInt(data, "port")
 	ticket := sigStr(data, "ticket")
@@ -527,7 +559,7 @@ func (e *connEngine) hostOnTurnAlloc(from string, data map[string]any) {
 		}
 
 		e.mu.Lock()
-		if e.turnSession != nil || e.stdTurnSession != nil || e.sess == nil {
+		if e.turnSession != nil || e.stdTurnSession != nil || e.sess == nil || epoch != e.turnSessionEpoch {
 			e.mu.Unlock()
 			session.unbind()
 			return
@@ -592,6 +624,7 @@ func (e *connEngine) hostOnStdTurnAlloc(from string, data map[string]any) {
 		e.sendTurnNack(from, "bad_alloc")
 		return
 	}
+	epoch := e.turnEpochNow() // F7：标准 TURN host 链（cred+allocate+bind）的写回凭证
 
 	go func() {
 		e.mu.Lock()
@@ -625,7 +658,7 @@ func (e *connEngine) hostOnStdTurnAlloc(from string, data map[string]any) {
 			return
 		}
 		e.mu.Lock()
-		if e.turnSession != nil || e.stdTurnSession != nil || e.sess == nil {
+		if e.turnSession != nil || e.stdTurnSession != nil || e.sess == nil || epoch != e.turnSessionEpoch {
 			e.mu.Unlock()
 			stdTurnClose(session)
 			return
@@ -770,6 +803,11 @@ func (e *connEngine) guestOnStdTurnReady(data map[string]any) {
 
 // turnGuestBridgeUp guest 侧桥接：本地监听桥 + 成功上报。
 func (e *connEngine) turnGuestBridgeUp(transport *rudpConn) {
+	// 载具热切优先（模组 startUdpPunchBridge 第一分支）：旧道被 25s 验证窗判死时 gP2PDone 仍是 true，
+	// 若先看下面那道"已完成就关新传输"的守卫，新道会被自己关掉——换道必须抢在它前面。
+	if e.tryCarrierSwap(transport) {
+		return
+	}
 	e.mu.Lock()
 	if e.gP2PDone {
 		e.mu.Unlock()
@@ -802,6 +840,9 @@ func (e *connEngine) turnGuestBridgeUp(transport *rudpConn) {
 	e.turnBridge = bridge
 	e.mu.Unlock()
 	e.app.netLog("info", "TURN 中继已建立")
+	// 中继模式：起上行记账 + 25s 真连接验证窗，turnPath=true（CM:14986-14989）。
+	startJoinerJournal()
+	e.armRelayVerifyWatchdog(true)
 	e.notifyState(phaseTurn, statusSuccess, addr, "")
 }
 

@@ -3,7 +3,9 @@
  * 房间页（hosting / in_room 共用）：
  * 头部 / 信令事件流 / 房间设置(host) / ModSync / 连接日志 / 连接卡（房客）
  *
- * 应用端不再展示中继节点；P2P 打改为无限重试（前端也不再走 p2p failed 终态）。
+ * 应用端不再展示中继节点；P2P 打洞改为无限重试（前端不再走 p2p failed 终态）。
+ * 2026-10-05：中继入口改为纯自动编排——连接卡没有任何手动按钮，只显示阶段叙述
+ * 与"通道没连上"的 3 秒瞬态提示（对齐模组 1.2.0 的 AttemptingJoinScreen）。
  * ============================================================ */
 "use strict";
 
@@ -246,21 +248,24 @@
   }
 
   /* ---------------- 连接流程（房客专用） ----------------
-   * 新语义（与无限打洞对齐）：
-   *   - p2p 阶段只有 trying → success，没有 failed 终态（后端无限重试）
-   *   - 进入房间立即显示 "P2P 打洞进行中" + 计时
-   *   - 计时 >20s  → 亮出 [尝试直连]
-   *   - 计时 >40s  → 再亮出 [使用中继]
-   *   - 两个按钮都显示后，玩家点任一 → 隐藏两按钮 → 进入该阶段 trying
-   *   - 该阶段 failed → 重新亮出两个按钮
-   *   - 任何阶段 success 到达（哪怕还在直连/中继阶段）→ 直接切成功卡
-   *   - 成功卡地址：p2p/direct success → hostIp:port；prelay success → 127.0.0.1:port
+   * 2026-10-05 与模组 1.2.0 对齐：手动"尝试直连 / 使用中继 / 使用 TURN 中继"三个入口
+   * 已退役，中继由引擎侧智能自动编排器触发（证据分级 + TURN 优先 + 真连接验证 + 静默换道）。
+   * 前端只做呈现，没有任何可点的中继入口，也没有"倒计时解锁按钮"：
+   *   - 阶段行 = conn:state 的 (phase,status) 叙述：p2p / direct / turn / prelay / fed
+   *   - 通道"进行中→未连上"这条沿 → 3 秒瞬态提示（对应模组 AttemptingJoinScreen 的
+   *     relayFailedMsgTime / turnFailedMsgTime 沿检测与 elapsed < 3000 可见规则）
+   *   - 两条中继道本轮都失败且仍未连上 → 阶段行改说"中继均不可用，继续打洞…"
+   *   - 任何阶段 success 到达 → 直接切成功卡
+   *   - 成功卡地址：p2p/direct success → hostIp:port；prelay/turn/fed success → 127.0.0.1:port
    */
+
+  // 阶段文案：turn/prelay 取自 lang 键 voxlink.auto_relay.turn / .player（lang/zh_cn.json:464-466），
+  // 模组在编排器发起该通道时把同一句写进 connectionMode（ConnectionManager:12834 / :12843 / :12879）。
   var CONN_TEXT = {
     p2p:    { label: "P2P 打洞",  trying: "P2P 打洞进行中…" },
     direct: { label: "直连",      trying: "正在尝试直连…",   failed: "连接失败，对方可能是其他游戏、不兼容的版本或网络不可达" },
-    prelay: { label: "玩家中继",  trying: "正在建立玩家中继…", failed: "连接失败，对方可能是其他游戏、不兼容的版本或网络不可达" },
-    turn:   { label: "TURN 中继", trying: "正在建立 TURN 中继…", failed: "TURN 中继建立失败，可稍后重试或改用玩家中继" },
+    prelay: { label: "玩家中继",  trying: "自动使用玩家中继…", failed: "中继失败，继续尝试直连打洞..." },
+    turn:   { label: "TURN 中继", trying: "直连未通，自动使用中继…", failed: "中继不可用，继续尝试直连" },
     // 互通房（Happy Link 镜像）：lang 键 voxlink.connection.fed_setup / fed_failed 同文案
     fed:    { label: "互通中继",  trying: "正在通过互通中继连接房间...", failed: "互通房间连接失败" }
   };
@@ -269,20 +274,31 @@
   var SOFT_HINT_APP  = "若无法进入，对方可能是其他游戏或不兼容的版本";
   var SOFT_HINT_MOD  = "若无法进入，可能是 MC 版本不兼容";
   var FAILED_HINT_MOD = "连接失败，可能是版本不兼容或网络不可达";
-  // 20s / 40s 两个阈值，可由外部覆盖（毫秒）
-  var CONN_REVEAL_DIRECT_MS = (VL.connRevealDirectMs !== undefined) ? VL.connRevealDirectMs : 20 * 1000;
-  var CONN_REVEAL_PRELAY_MS  = (VL.connRevealPrelayMs  !== undefined) ? VL.connRevealPrelayMs  : 40 * 1000;
-  var CONN_REVEAL_TURN_MS    = (VL.connRevealTurnMs     !== undefined) ? VL.connRevealTurnMs     : 20 * 1000;
+
+  // 3 秒瞬态提示文案（沿检测专用），逐条对应模组 lang 键：
+  var CONN_HINT = {
+    // voxlink.relay.failed_retry_punch（lang/zh_cn.json:241）
+    // 模组沿检测：玩家中继"进行中→空闲且未连上"= 自动尝试失败（AttemptingJoinScreen:645-648, :697-704）
+    relayFailed: "中继失败，继续尝试直连打洞...",
+    // voxlink.turn.failed（lang/zh_cn.json:386）
+    // 模组沿检测：TURN"忙→空闲且未连上"（AttemptingJoinScreen:651-658, :706-713）
+    turnFailed: "中继不可用，继续尝试直连",
+    // voxlink.logui.auto_relay_dead（lang/zh_cn.json:469，ConnectionManager:12958）
+    // 同一条沿，但这条道曾经承载过流量 → 是"建起来却哑了"，不是建不起来
+    relayDead: "中继通道无响应，自动换道"
+  };
+  // 可见时长：模组常量 RELAY_FAILED_MSG_MS = 3000（AttemptingJoinScreen:40）
+  var CONN_HINT_MS = 3000;
+  // 中继两道的 exhausted 兜底文案：voxlink.auto_relay.exhausted（lang/zh_cn.json:466）
+  var CONN_EXHAUSTED = "中继均不可用，继续打洞…";
 
   var conn = null;
 
   function connClearTimers() {
     if (!conn) return;
     if (conn.tick) clearInterval(conn.tick);
-    if (conn.revealT1) clearTimeout(conn.revealT1);
-    if (conn.revealT2) clearTimeout(conn.revealT2);
-    if (conn.revealT3) clearTimeout(conn.revealT3);
-    conn.tick = conn.revealT1 = conn.revealT2 = conn.revealT3 = null;
+    if (conn.hintTimer) clearTimeout(conn.hintTimer);
+    conn.tick = conn.hintTimer = null;
   }
 
   function connTickRender() {
@@ -304,6 +320,28 @@
     }
   }
 
+  // 显示一条 3 秒瞬态提示；到期即消失（与模组 render 里 elapsed < 3000 的写法等价）。
+  function connShowHint(text) {
+    if (!conn || !text) return;
+    conn.hint = text;
+    if (conn.hintTimer) clearTimeout(conn.hintTimer);
+    conn.hintTimer = setTimeout(function () {
+      if (!conn) return;
+      conn.hint = "";
+      conn.hintTimer = null;
+      connRender();
+    }, CONN_HINT_MS);
+  }
+
+  // 沿检测：某条中继道"进行中 → 没连上就收尾"= 自动编排这一次没接通
+  // （编排器已经换道或回头继续打洞，玩家不需要、也没法手工再点一次）。
+  function connLaneClosed(phase) {
+    if (!conn) return;
+    if (phase !== "prelay" && phase !== "turn") return;
+    conn.lanes[phase] = true;
+    connShowHint(conn.address ? CONN_HINT.relayDead : (phase === "prelay" ? CONN_HINT.relayFailed : CONN_HINT.turnFailed));
+  }
+
   function connRender() {
     var card = VL.$("#conn-card");
     if (!conn) {
@@ -320,14 +358,16 @@
     var timer = VL.$("#conn-timer");
     var detail = VL.$("#conn-detail");
     var hint = VL.$("#conn-hint");
-    var actions = VL.$("#conn-actions");
     var success = VL.$("#conn-success");
     var appNote = VL.$("#conn-app-note");
 
     // 连接卡顶部小字：对方为应用端房间
     if (appNote) appNote.classList.toggle("hidden", !(session.clientType === "app"));
 
-    var failed = conn.status === "failed";
+    // 两条中继道本轮都试过且都没连上 → exhausted 兜底文案。它不是终态：
+    // 打洞仍在继续（模组里这句就是"继续打洞"），所以不给红色失败样式、保留 spinner。
+    var exhausted = !!(conn.lanes && conn.lanes.prelay && conn.lanes.turn);
+    var failed = conn.status === "failed" && !exhausted;
     box.classList.remove("hidden");
     box.classList.toggle("is-failed", failed);
     // failed 文案按房间 clientType 区分：mod 房（必是 MC）→ 版本不兼容；app 房 → 其他游戏/版本。
@@ -335,7 +375,7 @@
     if (failed && conn.phase !== "p2p" && session.clientType === "mod") {
       failedText = FAILED_HINT_MOD;
     }
-    text.textContent = failed ? failedText : t.trying;
+    text.textContent = exhausted ? CONN_EXHAUSTED : (failed ? failedText : t.trying);
     spin.classList.toggle("hidden", failed);
     timer.classList.toggle("hidden", failed);
     if (!failed) connTickRender();
@@ -343,26 +383,15 @@
     detail.classList.toggle("hidden", !conn.detail);
     detail.textContent = conn.detail || "";
 
-    // p2p 阶段 trying 时的小字提示
-    var showHint = (conn.phase === "p2p" && conn.status === "trying");
-    if (hint) hint.classList.toggle("hidden", !showHint);
-
-    // 中继入口按计时亮出；任一阶段失败后仍保留（是否使用由玩家决定，绝不自动切换）
-    var showActions = conn.status !== "success" &&
-      (conn.reveal.direct || conn.reveal.prelay || conn.reveal.turn);
-    actions.classList.toggle("hidden", !showActions);
-    if (showActions) {
-      VL.$("#conn-btn-direct").classList.toggle("hidden", !conn.reveal.direct || failed);
-      VL.$("#conn-btn-prelay").classList.toggle("hidden", !conn.reveal.prelay);
-      VL.$("#conn-btn-turn").classList.toggle("hidden", !conn.reveal.turn);
-    }
+    // 瞬态提示行：只在沿检测后的 3 秒窗口内出现
+    hint.classList.toggle("hidden", !conn.hint);
+    hint.textContent = conn.hint || "";
 
     success.classList.add("hidden");
     if (conn.status === "success") {
       box.classList.add("hidden");
       detail.classList.add("hidden");
-      if (hint) hint.classList.add("hidden");
-      actions.classList.add("hidden");
+      // 瞬态提示行不受成功卡影响：已连上之后某条承载过的道掉了（无缝换道）仍要看得见
       success.classList.remove("hidden");
       VL.$("#conn-addr").textContent = conn.address || "-";
       var isTunnel = (conn.address || "").indexOf("127.0.0.1") === 0;
@@ -377,7 +406,7 @@
     }
   }
 
-  // 进入房间（房客）：自动开始 P2P 打洞阶段
+  // 进入房间（房客）：自动开始 P2P 打洞；后续通道一律由引擎侧自动编排器推进
   function connStart() {
     if (session.isHost) return;
     if (conn && conn.code === session.code) return; // 同一房间已在进行中
@@ -388,32 +417,14 @@
       status: "trying",
       address: "",
       detail: "",
+      hint: "",
       startedAt: Date.now(),
       tick: null,
-      revealT1: null,
-      revealT2: null,
-      reveal: { direct: false, prelay: false, turn: false }
+      hintTimer: null,
+      // 本轮"试过且没连上"的中继道：两条都失败 → 显示 exhausted 兜底文案
+      lanes: { prelay: false, turn: false }
     };
     connStartTick();
-
-    // 阶段 p2p 下，按时间阈值亮出 [尝试直连] / [使用中继]
-    conn.revealT1 = setTimeout(function () {
-      if (!conn || conn.phase !== "p2p" || conn.status !== "trying") return;
-      conn.reveal.direct = true;
-      connRender();
-    }, CONN_REVEAL_DIRECT_MS);
-    conn.revealT2 = setTimeout(function () {
-      if (!conn || conn.phase !== "p2p" || conn.status !== "trying") return;
-      conn.reveal.direct = true;
-      conn.reveal.prelay = true;
-      connRender();
-    }, CONN_REVEAL_PRELAY_MS);
-    conn.revealT3 = setTimeout(function () {
-      if (!conn || conn.phase !== "p2p" || conn.status !== "trying") return;
-      conn.reveal.turn = true;
-      connRender();
-    }, CONN_REVEAL_TURN_MS);
-
     connRender();
   }
 
@@ -426,7 +437,7 @@
     var soft = VL.$("#conn-success-soft");
     if (soft) soft.classList.add("hidden");
     var hint = VL.$("#conn-hint");
-    if (hint) hint.classList.add("hidden");
+    if (hint) { hint.textContent = ""; hint.classList.add("hidden"); }
     var appNote = VL.$("#conn-app-note");
     if (appNote) appNote.classList.add("hidden");
   }
@@ -437,71 +448,61 @@
     conn.status = "success";
     conn.address = address;
     conn.detail = "";
+    conn.hint = "";
     connRender();
   }
 
-  // p2p 阶段已经不会到达这里（不再有 p2p failed 终态），保留接口以防御性兜底
-  function connFail(phase, detail) {
-    if (!conn) return;
-    conn.phase = CONN_TEXT[phase] ? phase : conn.phase;
-    conn.status = "failed";
-    conn.detail = detail || "";
-    connStopTick();
-    // 该阶段失败 → 保留两个中继入口（TURN 失败可换玩家中继，反之亦然）
-    conn.reveal.direct = false;
-    conn.reveal.prelay = true;
-    conn.reveal.turn = true;
-    connRender();
-  }
-
-  function connAvailable(phase) {
-    if (!conn || (phase !== "direct" && phase !== "prelay" && phase !== "turn")) return;
-    conn.reveal[phase] = true;
-    connRender();
-  }
-
-  function connAttempt(phase) {
-    if (!conn || (phase !== "direct" && phase !== "prelay" && phase !== "turn")) return;
-    conn.phase = phase;
-    conn.status = "trying";
-    conn.detail = "";
-    conn.startedAt = Date.now();
-    connStartTick();
-    connRender();
-    var apiName = phase === "direct" ? "TryDirect" : (phase === "turn" ? "UseTurnRelay" : "UsePlayerRelay");
-    VL.api(apiName).catch(function (e) {
-      VL.toast(VL.errText(e), "error");
-      if (conn && conn.status === "trying" && conn.phase === phase) connFail(phase, "");
-    });
-  }
-
-  // 供 app.js 转发 conn:state 事件。
+  // 供 app.js 转发 conn:state 事件：本函数只做呈现，不触发任何通道（无手动中继入口）。
   VL.onConnStateEvent = function (payload) {
     payload = payload || {};
     if (!conn) return;
     var status = payload.status;
+    var phase = CONN_TEXT[payload.phase] ? payload.phase : null;
+
     if (status === "success") {
-      // 任何阶段 success 到达 → 立即切成功卡（即便还在直连/中继阶段）
+      // 任何阶段 success 到达 → 立即切成功卡
       connSuccess(payload.address || "");
-    } else if (status === "failed") {
-      connFail(payload.phase, payload.detail);
-    } else if (status === "available") {
-      connAvailable(payload.phase);
-    } else if (status === "trying") {
-      var phase = CONN_TEXT[payload.phase] ? payload.phase : null;
-      if (phase && (phase !== conn.phase || conn.status !== "trying")) {
-        // p2p trying → 不打断前端的"无限等待"语义：忽略阶段切换，
-        // 仍维持原 p2p trying 计时与按钮亮出逻辑；
-        // 仅当后端显式推进到 direct / prelay 才视为阶段切换。
-        if (phase !== "p2p") {
-          conn.phase = phase;
-          conn.status = "trying";
-          conn.detail = "";
-          conn.startedAt = Date.now();
-          connStartTick();
-          connRender();
-        }
+      return;
+    }
+
+    // 已经连上之后又来通道级事件：成功卡不回收（自动换道是无缝的，本地地址照常可玩），
+    // 只按同一条沿检测给 3 秒提示——"建起来过又掉了"= 中继通道无响应。
+    if (conn.status === "success") {
+      if (status === "failed") {
+        connLaneClosed(phase || conn.phase);
+        connRender();
       }
+      return;
+    }
+
+    if (status === "failed") {
+      var deadPhase = phase || conn.phase;
+      conn.phase = deadPhase;
+      conn.status = "failed";
+      conn.detail = payload.detail || "";
+      connStopTick();
+      connLaneClosed(deadPhase);
+      connRender();
+      return;
+    }
+
+    if (status === "trying") {
+      if (!phase) return;
+      if (phase === conn.phase && conn.status === "trying") return; // 同通道重复播报：不打断计时
+      // 上一通道还没连上就被换掉 → 走与模组一致的"进行中→空闲且未连上"沿检测
+      if (conn.status === "trying") connLaneClosed(conn.phase);
+      conn.phase = phase;
+      conn.status = "trying";
+      conn.detail = "";
+      conn.startedAt = Date.now();
+      if (phase === "p2p" || phase === "direct") {
+        // 编排器回头继续打洞：新一轮，exhausted 判定清零
+        conn.lanes = { prelay: false, turn: false };
+      } else {
+        conn.lanes[phase] = false; // 这条道正在被重新尝试，本轮不计失败
+      }
+      connStartTick();
+      connRender();
     }
   };
 
@@ -620,10 +621,7 @@
     VL.$("#hs-save").addEventListener("click", saveHostSettings);
     VL.$("#mods-refresh").addEventListener("click", loadMods);
 
-    // 连接卡（房客）
-    VL.$("#conn-btn-direct").addEventListener("click", function () { connAttempt("direct"); });
-    VL.$("#conn-btn-prelay").addEventListener("click", function () { connAttempt("prelay"); });
-    VL.$("#conn-btn-turn").addEventListener("click", function () { connAttempt("turn"); });
+    // 连接卡（房客）：自动编排模型下这里只有"复制地址"，没有任何中继入口
     VL.$("#conn-copy").addEventListener("click", function () {
       if (conn && conn.address) VL.copy(conn.address);
     });

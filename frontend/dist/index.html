@@ -250,12 +250,8 @@
                 <span class="conn-timer" id="conn-timer">已用时 0s</span>
               </div>
               <p class="conn-detail hidden" id="conn-detail"></p>
-              <p class="conn-hint hidden" id="conn-hint">打洞中…可稍后尝试其他方式</p>
-              <div class="conn-actions hidden" id="conn-actions">
-                <button class="btn btn-primary btn-sm hidden" id="conn-btn-direct">尝试直连</button>
-                <button class="btn btn-ghost btn-sm hidden" id="conn-btn-prelay">使用中继</button>
-                <button class="btn btn-ghost btn-sm hidden" id="conn-btn-turn">使用 TURN 中继</button>
-              </div>
+              <!-- 自动中继编排的 3 秒瞬态提示（通道"进行中→未连上"时出现），无手动入口 -->
+              <p class="conn-hint hidden" id="conn-hint"></p>
               <div class="conn-success hidden" id="conn-success">
                 <div class="conn-addr-row">
                   <code class="conn-addr" id="conn-addr"></code>
@@ -432,6 +428,12 @@
               <option value="light">浅色</option>
               <option value="dark">深色</option>
             </select>
+          </div>
+          <div class="field switch-field">
+            <div><div class="field-label">玩家中继</div></div>
+            <label class="switch" title="开着才会被别人选中做中继，也能使用别人的中继；只影响玩家中继，不影响 TURN">
+              <input type="checkbox" id="set-relay"><span class="slider"></span>
+            </label>
           </div>
           <div class="form-error hidden" id="settings-error"></div>
           <button class="btn btn-primary" id="set-save">保存设置</button>

@@ -125,6 +125,26 @@ type connEngine struct {
 	punchRecvEver      bool // 整个会话是否收到过对端任何 UDP 包
 	predictionOffCount int  // PREDICTION_OFF 累计频次（封顶 50）
 	retryRound         int  // 持续重试轮次（零收包终局判定）
+	gLocalNat          natClass
+
+	// 智能自动中继编排器（模组 CM:12733-12747，字段含义逐项对应）
+	autoRelayDirectorCancel  context.CancelFunc // autoRelayDirectorTask
+	autoRelayArmWaiterCancel context.CancelFunc // autoRelayArmWaiterTask（F1 挂载复查）
+	relayVerifyCancel        context.CancelFunc // relayVerifyWatchdogTask（25s 真连接验证窗）
+	relayBgProbeCancel       context.CancelFunc // relayBgProbeTask（中继后 10 分钟后台直连探测）
+	autoRelayTurnAttempted   bool
+	autoRelayTurnUnhealthy   bool
+	autoRelayPlayerAttempted bool
+	autoRelayMode            bool   // 自动尝试进行中：中继失败走换道/回打洞而非失败屏
+	autoRelayArmedRound      int    // 触发时的持续重试轮（初值 -1，见 stopAutoRelayAll）
+	carrierSwapFrom          string // 旧道形态 "turn"/"player"，换道成功后据此拆旧
+	punchUiStartMs           int64  // 打洞计时基准：首周期只设一次，轮次/ICE 重置都不清（CM:322,6592）
+	turnSessionEpoch         int64  // TURN 会话纪元（F7 异步写回屏障）
+
+	// 玩家中继候选池（relay_pool.go）
+	poolCancel  context.CancelFunc
+	poolMapped  *stunMappedAddr
+	poolNatType string
 
 	// TCP SimOpen（tcp_punch.go）
 	tcpPunchInFlight bool
@@ -188,7 +208,20 @@ func (e *connEngine) bindSession(s *session, clientID string) {
 		e.gMappedCh = make(chan *stunMappedAddr, 4)
 	}
 	isHost := s.isHost
+	e.punchUiStartMs = 0 // 新会话起点清零（CM:14502：0 表示本会话尚未开始打洞，防旧值误判成已超时）
+	e.autoRelayArmedRound = autoRelayInitialRound
 	e.mu.Unlock()
+
+	// 会话起点先做一次全量复位，再挂导演（模组 startDualP2P 就是这个顺序：stopAutoRelayAll → arm）。
+	// 用 arm 而不是直接挂：join 往返 >1s 时此刻的会话/offer 还没齐，直接挂会在这一场整落空（F1）。
+	e.stopAutoRelayAll()
+	if !isHost && !roomIsHappyLink(room) {
+		e.scheduleAutoRelayDirectorArm()
+	}
+	// 候选池：房主与房客都要登记，否则本端永远挑不到、别人也借不到我们中继。
+	e.startRelayPool()
+	// 桥层日志出口：不接就整层静默（换道/排干/种子重放这些关键留痕全在桥层）。
+	setJoinerBridgeLogf(e.app.netLog)
 
 	e.app.netLog("info", fmt.Sprintf("连接引擎就绪（role=%s）", roleStr(isHost)))
 	if !isHost {
@@ -227,6 +260,13 @@ func (e *connEngine) unbindSession(s *session) {
 
 // teardown 全量清理：停打洞、关 socket、拆桥、尽力通知对端 disconnect。
 func (e *connEngine) teardown() {
+	e.stopAutoRelayAll() // 模组把 stopAutoRelayAll 放在 stopAllConnectionWork 的第一步（CM:1588-1590）
+	// 候选池注销要趁 code/token 还在的时候做：清完之后就没法向服务端证明"这个 peer 是我的"了，
+	// 只能等 TTL 120s 自然回收——那段时间里别人挑到一个已经不在的候选（0926 踩过）。
+	e.stopRelayPool()
+	// 会话是"主动结束"而不是"链路死了"：不声明会话终止的话，承载死亡关闭会按模组的
+	// 换道窗口等满 15s 才回调拆桥（PB:1185/1269 是故意留给换道的）。
+	stopJoinerSession()
 	e.teardownTurn(false)
 	e.mu.Lock()
 	if e.cancel != nil {
@@ -733,6 +773,21 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 		samplePorts[i] = s.Port
 	}
 	localNat := natClassFromDelta(samplePorts)
+	e.mu.Lock()
+	e.gLocalNat = localNat
+	if mine != nil {
+		// 顺手把候选池要的映射地址与 natType 记下来，省掉注册路径上再探一次 STUN
+		//（同一 socket 的采样结果就是打洞用的那个映射）。
+		m := *mine
+		e.poolMapped = &m
+		e.poolNatType = natTypeFromSamples(samples, "")
+	}
+	if e.punchUiStartMs == 0 {
+		// 打洞计时基准：首周期只设一次，持续重试轮次与 ICE 重启都不重置（CM:6592-6596）——
+		// 重置会让编排器的 15/30/45s 证据档永远数不满。
+		e.punchUiStartMs = time.Now().UnixMilli()
+	}
+	e.mu.Unlock()
 	if mine != nil {
 		e.mu.Lock()
 		e.gMyMappedIP = mine.IP
@@ -893,13 +948,13 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 		e.mu.Unlock()
 		if offCount >= predictionOffCap && !recvEver {
 			e.app.netLog("warn", "PREDICTION_OFF 封顶（50）且零收包，终止直连打洞")
-			e.notifyState(phaseP2P, statusFailed, "", "端口预测已封顶，可尝试中继")
+			e.notifyState(phaseP2P, statusFailed, "", "端口预测已封顶，直连暂停（中继由自动编排接管）")
 			e.closeGuestPunchSock(sock)
 			return
 		}
 		if round >= zeroRecvFinalRoundLimit && !recvEver {
 			e.app.netLog("warn", "持续重试 20 轮零收包，判定终局")
-			e.notifyState(phaseP2P, statusFailed, "", "对端无响应，可尝试中继")
+			e.notifyState(phaseP2P, statusFailed, "", "对端无响应，直连暂停（中继由自动编排器尝试）")
 			e.closeGuestPunchSock(sock)
 			return
 		}
@@ -1019,6 +1074,17 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 			rc.setOnRestart(func() { e.guestIceRestart() })
 			// 玩家中继 v2：双方都声明 relayMuxV1 才 mux 化，且必须在 Start 之前（模组 RUDP:160）。
 			setupRelayMux(rc, hostSupportsCap(e.app.snapshotRoom(), relayMuxCapability), e.app.netLog, "guest", "joiner")
+			// 载具热切优先（模组 startUdpPunchBridge 的第一个分支，CM:14949-14957）：
+			// 旧道被判"建立但死"、新道到了 → 不新建本地桥，只换承载并重放上行日志，
+			// MC 那条 TCP 全程不动。swapJoinerCarrier 内部会 start() 新承载，所以这里必须排在 rc.Start() 之前。
+			if e.tryCarrierSwap(rc) {
+				p.cancel()
+				if winConn != sock {
+					_ = sock.Close()
+				}
+				e.app.netLog("info", "P2P 新承载已热切，本地桥与 MC 连接不动")
+				return
+			}
 			rc.Start()
 			_, bridge, berr := startGuestBridge(rc, func() { e.guestBridgeDown() })
 			if berr != nil {
@@ -1242,6 +1308,9 @@ func (e *connEngine) guestIceRestart() {
 	if gen, ok := e.beginGuestCycle(); ok {
 		go e.guestPunchFlow(gen, copyMap(offer), "host")
 	}
+	// F3：ICE 重挂导演。轮次与计时基准都不重置（punchUiStartMs 语义），但导演可能已在上一道
+	// 中继里被 G2 挡住后自取消；重挂一次，新一轮打洞才有新的中继机会（CM:14381-14385 在方法末尾）。
+	e.startAutoRelayDirector()
 }
 
 // onRequestIceRestart 收到对端 ice_restart：拆当前链路重新协商。

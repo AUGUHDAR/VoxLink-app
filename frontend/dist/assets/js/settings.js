@@ -1,6 +1,6 @@
 /* ============================================================
  * VoxLink Desktop — settings.js
- * 设置：仅主题切换 / 版本号（应用端只暴露主题）
+ * 设置：主题 / 玩家中继开关 / 版本号
  * ============================================================ */
 "use strict";
 
@@ -10,6 +10,7 @@
 
   function cacheEls() {
     els.theme = VL.$("#set-theme");
+    els.relay = VL.$("#set-relay");
     els.save = VL.$("#set-save");
     els.error = VL.$("#settings-error");
     els.version = VL.$("#settings-version");
@@ -23,17 +24,22 @@
       els.version.textContent = "v" + (data.version || FALLBACK_VERSION);
       VL.themes.current = VL.applyTheme(data.theme || "light");
       els.theme.value = VL.themes.current;
+      // relayEnabled 缺省按模组的默认值 true（VoxLinkConfig.java:41）
+      els.relay.checked = data.relayEnabled !== false;
     } catch (e) {
       els.version.textContent = "v" + FALLBACK_VERSION;
     }
   }
 
-  // SaveSettings 只保存 theme（应用端不暴露服务器地址等参数）
+  // SaveSettings 保存主题与玩家中继开关（应用端不暴露服务器地址等参数）
   async function save() {
     els.error.classList.add("hidden");
     els.save.disabled = true;
     try {
-      await VL.api("SaveSettings", JSON.stringify({ theme: VL.themes.current }));
+      await VL.api("SaveSettings", JSON.stringify({
+        theme: VL.themes.current,
+        relayEnabled: !!els.relay.checked
+      }));
       VL.toast("已保存", "success");
     } catch (e) {
       if (e.code !== "NO_BACKEND") {
@@ -52,10 +58,23 @@
     } catch (e) { /* 主题即时生效，持久化失败不弹错误 */ }
   }
 
+  async function changeRelay() {
+    try {
+      await VL.api("SaveSettings", JSON.stringify({ relayEnabled: !!els.relay.checked }));
+    } catch (e) {
+      if (e.code !== "NO_BACKEND") {
+        els.error.textContent = VL.errText(e);
+        els.error.classList.remove("hidden");
+      }
+      els.relay.checked = !els.relay.checked; // 保存失败就退回原状，别让界面骗人
+    }
+  }
+
   VL.initSettings = function () {
     cacheEls();
     els.save.addEventListener("click", save);
     els.theme.addEventListener("change", changeTheme);
+    els.relay.addEventListener("change", changeRelay);
     load();
   };
 })(window.VL);
