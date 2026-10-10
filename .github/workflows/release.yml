@@ -45,6 +45,7 @@ jobs:
             os: ubuntu-latest
             goos: linux
             goarch: amd64
+            native: true   # runner 就是 linux/amd64，压完能真跑一次
           - name: cli-linux-arm64
             variant: cli
             os: ubuntu-latest
@@ -52,40 +53,52 @@ jobs:
             goarch: arm64
           - name: cli-macos-arm64
             variant: cli
-            os: ubuntu-latest
+            os: macos-latest
             goos: darwin
             goarch: arm64
+            native: true
           - name: cli-macos-amd64
             variant: cli
-            os: ubuntu-latest
+            os: macos-13
             goos: darwin
             goarch: amd64
+            native: true
+            # GitHub 正在淘汰 Intel macOS runner：这一格失败不拖红整条发布。
+            continue-on-error: true
           # ---- UI 版：需要各平台的 CGO 工具链，只能在对应平台产 ----
           - name: ui-windows-amd64
             variant: ui
             os: windows-latest
             goos: windows
             goarch: amd64
+            native: true
           - name: ui-linux-amd64
             variant: ui
             os: ubuntu-latest
             goos: linux
             goarch: amd64
+            native: true
           - name: ui-macos-arm64
             variant: ui
             os: macos-latest
             goos: darwin
             goarch: arm64
+            native: true
           - name: ui-macos-amd64
             variant: ui
             os: macos-13
             goos: darwin
             goarch: amd64
+            native: true
             # GitHub 正在淘汰 Intel macOS runner：这一格失败不拖红整条发布，
             # 由 Release 正文说明 Intel 版待补。
             continue-on-error: true
 
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash   # Windows runner 的默认 shell 是 PowerShell：不设这一行，
+                      # 构建步骤里的 `if [ ... ]` 会以 ParserError 直接挂掉
     steps:
       - uses: actions/checkout@v4
 
@@ -108,7 +121,12 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: ${{ matrix.variant == 'ui' && '1' || '0' }}
+          # Windows 的 wails 前端不需要 CGO（WebView2 走 COM）；在这里强开 CGO 会因为
+          # runner 上没有 gcc 而直接失败。只有 linux/mac 的 UI 必须开。
+          CGO_ENABLED: ${{ matrix.variant == 'ui' && matrix.goos != 'windows' && '1' || '0' }}
+          # macOS 新 SDK 把 UTType 从 AppKit 挪进了 UniformTypeIdentifiers，wails 的 cgo
+          # 声明没跟上 → 链接期 "Undefined symbols: _OBJC_CLASS_$_UTType"。补这一个 framework 就过。
+          CGO_LDFLAGS: ${{ matrix.goos == 'darwin' && '-framework UniformTypeIdentifiers' || '' }}
         run: |
           go version
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -118,27 +136,62 @@ jobs:
           fi
           OUT="dist/VoxLink-${{ matrix.variant == 'ui' && 'UI' || 'CLI' }}-${{ matrix.goos }}-${{ matrix.goarch }}$EXT"
           mkdir -p dist
+          TAGS=cli
           if [ "${{ matrix.variant }}" = "ui" ]; then
-            go build -trimpath -tags "desktop,production" -ldflags "-s -w $GUIFLAG" -o "$OUT" .
-          else
-            go build -trimpath -tags cli -ldflags "-s -w" -o "$OUT" .
+            TAGS="desktop,production"
+            # ubuntu-24.04 不再提供 webkit2gtk-4.0 的 dev 包，wails 靠这个标签切到 4.1
+            if [ "${{ matrix.goos }}" = "linux" ]; then
+              TAGS="$TAGS,webkit2_41"
+            fi
           fi
+          if [ "${{ matrix.variant }}" = "ui" ]; then
+            go build -trimpath -tags "$TAGS" -ldflags "-s -w $GUIFLAG" -o "$OUT" .
+          else
+            go build -trimpath -tags "$TAGS" -ldflags "-s -w" -o "$OUT" .
+          fi
+          ls -la "$OUT"
           echo "ARTIFACT=$OUT" >> "$GITHUB_ENV"
+          echo "TAGS=$TAGS" >> "$GITHUB_ENV"
 
-      - name: UPX 压缩（只压 CLI）
+      - name: UPX 压缩（只压 CLI；mac 压不动就保留未压缩产物，不硬压）
         if: matrix.variant == 'cli'
         run: |
-          sudo apt-get update && sudo apt-get install -y upx-ucl
-          upx --best --lzma "$ARTIFACT"
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get update && sudo apt-get install -y upx-ucl ;;
+            macOS) brew install upx ;;
+          esac
+          # UPX 4.2 对 Mach-O 直接 CantPackException: macOS is currently not supported；
+          # --force-macos 出来的东西不可信，宁可发大一点的包，也不发一个可能跑不起来的包。
+          if upx --best --lzma "$ARTIFACT"; then
+            echo "UPX=已压缩（--best --lzma）" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "UPX 不适用该平台，重建一份未压缩的"
+            go build -trimpath -tags cli -ldflags "-s -w" -o "$ARTIFACT" .
+            echo "UPX=未压缩（UPX 不支持该平台/格式）" >> "$GITHUB_STEP_SUMMARY"
+          fi
           ls -la "$ARTIFACT"
 
-      - name: 打包（macOS/Linux 的 UI 版给 tar.gz，方便启动器直接解）
+      - name: 冒烟（CLI 版在所属平台上真跑一次：压坏了必须在这里暴露，而不是在玩家机器上）
+        # UI 版不跑：它是窗口程序，runner 上没有显示器，而且 -H windowsgui 不写 stdout。
+        # UI 的可用性由本机（Windows）实跑验证，见发布说明。
+        if: matrix.variant == 'cli' && matrix.native == true
+        run: |
+          "./$ARTIFACT" describe --json > smoke.json
+          test -s smoke.json
+          grep -q '"commands"' smoke.json
+          echo "SMOKE=通过（$RUNNER_OS / ${{ matrix.variant }}）" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 打包（CLI 产物给 zip，UI 产物原样上传）
         run: |
           NAME=$(basename "$ARTIFACT")
           if [ "${{ matrix.variant }}" = "cli" ]; then
             zip -j "dist/${NAME}.zip" "$ARTIFACT" || true
           fi
-        shell: bash
+
+      - name: 产物大小与口径进摘要
+        run: |
+          SIZE=$(wc -c < "$ARTIFACT")
+          echo "| ${{ matrix.name }} | $SIZE 字节 | tags=$TAGS | ${{ matrix.variant }} |" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:

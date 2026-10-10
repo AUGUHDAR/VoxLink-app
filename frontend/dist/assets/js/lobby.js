@@ -91,7 +91,11 @@
     tags += '<span class="pill pill-accent">' + VL.esc(catName(r.category)) + "</span>";
     if (r.loader) tags += '<span class="pill">' + VL.esc(r.loader) + "</span>";
     if (r.gameVersion) tags += '<span class="pill">' + VL.esc(r.gameVersion) + "</span>";
-    if (r.clientType === "app") {
+    // 来源标签：CLI `room create --client-tag` 传了什么就显示什么（≤10 字，可为中文）。
+    // 没传标签时回落原口径：应用端房显示"应用端"，模组房显示它的 clientType。
+    if (r.clientTag) {
+      tags += '<span class="pill pill-app" title="该房间的创建端">' + VL.esc(r.clientTag) + "</span>";
+    } else if (r.clientType === "app") {
       tags += '<span class="pill pill-app" title="该房间由 VoxLink 应用端创建">应用端</span>';
     } else if (r.clientType) {
       tags += '<span class="pill">' + VL.esc(r.clientType) + "</span>";
