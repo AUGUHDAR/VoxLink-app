@@ -147,7 +147,10 @@ func (s *session) run() {
 // isFatalAuthError 判断是否为会话必须终止的致命错误码。
 func isFatalAuthError(code string) bool {
 	switch code {
-	case "ROOM_EXPIRED", "ROOM_CLOSED", "ROOM_EVICTED", "INVALID_TOKEN":
+	// ROOM_NOT_FOUND 必须在列：模组的心跳/轮询都把"服务端说房不存在"当作房已消失
+	// （RoomManager.java:1508 与 :1779-1786 → handleRoomLost）。缺这一条时房间被回收后
+	// 本端只会拆 WS 重拨、每 ~5s 一次 TLS 握手空转，界面还显示"运行中"，玩家拿不到失败提示。
+	case "ROOM_EXPIRED", "ROOM_CLOSED", "ROOM_EVICTED", "INVALID_TOKEN", "ROOM_NOT_FOUND":
 		return true
 	}
 	return false

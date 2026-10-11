@@ -584,8 +584,11 @@ func (e *connEngine) hostOnTurnAlloc(from string, data map[string]any) {
 		e.mu.Lock()
 		e.turnTransport = transport
 		e.mu.Unlock()
-		// TURN 承载同样要能跑玩家中继 v2：模组的 mux 闸门在通用传输工厂里（CM:15703），不按承载分叉。
-		setupRelayMux(transport, peerCapsContain(data, relayMuxCapability), e.app.netLog, from, "host")
+		// TURN 承载**不开 mux**：模组全仓只有一处 enableMux()，在直连工厂 establishUdpTransport 里
+		// （CM:15711），四条 TURN 传输（CM:11678/11875/12007/12140）都是 new ReliableUdpTransport(...)
+		// 直接造的，从不进 mux。原先这里按 turn_alloc 的 clientCapabilities 判，而该信令根本不带这个
+		// 字段（恒假）——于是房主没开、房客按房间能力表开了，房客每条 DATA 多 1 字节 chan 被房主当
+		// 原始字节灌进 MC 流，走 TURN 必进不去服。两边都必须不开。
 		transport.Start()
 		startHostLazyBridge(transport, mcPort, e.app.netLog)
 
@@ -675,7 +678,7 @@ func (e *connEngine) hostOnStdTurnAlloc(from string, data map[string]any) {
 		e.mu.Lock()
 		e.turnTransport = transport
 		e.mu.Unlock()
-		setupRelayMux(transport, peerCapsContain(data, relayMuxCapability), e.app.netLog, from, "host")
+		// TURN 承载不开 mux（同上 CM:15711 只在直连工厂里 enableMux）
 		transport.Start()
 		startHostLazyBridge(transport, mcPort, e.app.netLog)
 
@@ -737,7 +740,8 @@ func (e *connEngine) guestOnTurnReady(data map[string]any) {
 	transport.started.Store(true)
 	e.mu.Unlock()
 
-	setupRelayMux(transport, hostSupportsCap(e.app.snapshotRoom(), relayMuxCapability), e.app.netLog, "guest", "joiner")
+	// TURN 承载不开 mux：模组四条 TURN 传输都不 enableMux（见房主侧注释），房客单边开
+	// 会让线上载荷多 1 字节 chan，房主按原始字节写进 MC 流 → 登录即崩/被踢。
 	transport.Start()
 	e.turnGuestBridgeUp(transport)
 }
@@ -795,7 +799,7 @@ func (e *connEngine) guestOnStdTurnReady(data map[string]any) {
 		e.mu.Unlock()
 		e.applyTurnAuth(transport, e.roomCode(), e.turnJoinerID(), room, nil)
 
-		setupRelayMux(transport, hostSupportsCap(room, relayMuxCapability), e.app.netLog, "guest", "joiner")
+		// TURN 承载不开 mux（同上）
 		transport.Start()
 		e.turnGuestBridgeUp(transport)
 	}()

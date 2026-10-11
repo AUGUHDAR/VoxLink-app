@@ -117,6 +117,13 @@ type App struct {
 	room    map[string]any
 	session *session
 
+	// slotTaken 会话占位（对齐模组 currentRoom CAS null→PENDING，RoomManager.java:642-644）：
+	// state 要等真正 startSession 才离开 idle，而加入重试链最长约 35s（3×10s HTTP + 退避），
+	// 这期间玩家再点"建房"或双击"加入"会穿过互斥检查，两次 startSession 互相覆盖 a.session，
+	// 前一个会话的心跳/WS/轮询 goroutine 就再没人 stop（leaveInternal 只 stop 当前那个）。
+	// 刻意不往 state 里塞 "pending"：那是 UI 不认识的值，会污染 GetSessionState 的契约。
+	slotTaken bool
+
 	// joinAttemptGeneration 加入尝试代数（对齐模组 ConnectionManager.java:158 joinAttemptGeneration）：
 	// JoinRoom 开新一轮 +1；任何 kill of connection attempts（leaveInternal）也 +1，
 	// 旧重试链发现代数变了立即放弃（ConnectionManager.java:14911）。
@@ -322,14 +329,20 @@ func (a *App) leaveInternal() {
 		case <-time.After(3 * time.Second):
 			a.netLog("warn", "等待会话循环退出超时，强制继续")
 		}
-		// 尽力通知服务器（失败忽略：房间会因心跳超时自动回收）
-		_ = a.api.post(a.baseURL(), "/room/leave", map[string]any{
-			"code":   code,
-			"token":  token,
-			"isHost": isHost,
-		}, nil)
+		// 尽力通知服务器（失败忽略：房间会因心跳超时自动回收）。
+		// 放到后台：这是个 10s 超时的同步 POST，压在"离开"按钮上会让玩家觉得界面死了，
+		// 期间任何建房/加入还会被 SESSION_ACTIVE 拒掉。本地拆除动作必须留在前面做完，
+		// 这条 POST 不影响本地状态，谁先谁后对服务端等价。
+		go func() {
+			_ = a.api.post(a.baseURL(), "/room/leave", map[string]any{
+				"code":   code,
+				"token":  token,
+				"isHost": isHost,
+			}, nil)
+		}()
 	}
 	a.setState("idle", "", "", false, nil, nil)
+	a.releaseSessionSlot()
 	a.sessionStopped(isHost, hostPort) // RoomManager.java:556 + AttemptingJoinScreen.java:249
 }
 
@@ -337,20 +350,31 @@ func (a *App) leaveInternal() {
 func (a *App) clearSession(s *session) {
 	a.mu.Lock()
 	had := false
+	isHost := false
+	hostPort := 0
 	if a.session == s {
+		isHost = a.isHost
+		if a.room != nil {
+			hostPort = roomInt(a.room, "hostPort")
+		}
 		a.session = nil
 		a.state = "idle"
 		a.code = ""
 		a.token = ""
 		a.isHost = false
 		a.room = nil
+		a.slotTaken = false
 		had = true
 	}
 	a.mu.Unlock()
 	// 模组的拆除点是 stopScheduledTasks（RoomManager.java:1105）→ app 侧等价落点就是这里。
-	// 必须放在锁外：stopFedTunnel 会经 netLog→emit 回来抢同一把 a.mu，锁内调用直接死锁。
+	// 必须放在锁外：stopFedTunnel / sessionStopped 都会经 netLog→emit 回来抢同一把 a.mu。
 	if had {
 		a.stopFedTunnel()
+		// 房被回收/被踢/令牌失效这类"会话自己死了"的路径同样要收尾：
+		// 模组在 handleRoomLost 里就明确 closePort(hostPort)（RoomManager.java:1289-1298），
+		// 否则房主的 UPnP 映射会一直挂在路由器上、续租任务每 50 分钟续一次直到进程退出。
+		a.sessionStopped(isHost, hostPort)
 	}
 }
 
@@ -640,10 +664,16 @@ func (a *App) CreateRoom(reqJSON string) string {
 		clientTag = clean
 	}
 
-	// 会话互斥：hosting/in_room 时拒绝再建房（不再自动 LeaveRoom）。
+	// 会话互斥 + 占位：hosting/in_room 或上一次建房/加入还在途时拒绝（不再自动 LeaveRoom）。
 	if msg := requireIdleSession(a); msg != "" {
 		return msg
 	}
+	sessionStarted := false
+	defer func() {
+		if !sessionStarted {
+			a.releaseSessionSlot() // 没真正开会话就把占位交还，别让 App 永远"忙"
+		}
+	}()
 
 	// 端口探测：本地必须有人在监听 hostPort（MC / 服务端）。
 	if err := probeHostPort(req.HostPort); err != nil {
@@ -717,6 +747,7 @@ func (a *App) CreateRoom(reqJSON string) string {
 	if applyFedCreatePayload(room, data.Fed) {
 		a.startFedTunnelForRoom(room, req.HostPort)
 	}
+	sessionStarted = true
 	a.startSession(data.Code, data.HostToken, true, room, "")
 	a.modSyncOnRoomCreated()                                // 建房成功后立即后台构建两档清单（ModSyncManifestService 的 onRoomCreated）
 	a.hostSessionStarted(data.Code, req.Name, req.HostPort) // 模组同位置：UPnP 映射 + STUN 精探 + 日志样本登记
@@ -731,16 +762,29 @@ func (a *App) CreateRoom(reqJSON string) string {
 	})
 }
 
-// requireIdleSession 会话互斥检查：hosting/in_room 时返回 SESSION_ACTIVE 错误串。
+// requireIdleSession 会话互斥检查 + 占位：忙（已开会话，或上一次建房/加入还在途）时
+// 返回 SESSION_ACTIVE 错误串，成功时把会话槽位原子占下。
 // CreateRoom 与 JoinRoom 共用（建房中再建房/再加入是事故源，删除原来的自动 LeaveRoom 幂等）。
+// **占到槽位的调用必须在每一条提前 return 的路径上释放**——统一用
+// defer 配 "没走到 startSession 就 release" 的写法，别手写在各分支里。
 func requireIdleSession(a *App) string {
 	a.mu.Lock()
-	state := a.state
+	busy := a.state != "idle" || a.slotTaken
+	if !busy {
+		a.slotTaken = true
+	}
 	a.mu.Unlock()
-	if state == "hosting" || state == "in_room" {
+	if busy {
 		return wrapErr("SESSION_ACTIVE", "请先退出当前房间再操作")
 	}
 	return ""
+}
+
+// releaseSessionSlot 交还占位（建房/加入失败、或会话结束时）。
+func (a *App) releaseSessionSlot() {
+	a.mu.Lock()
+	a.slotTaken = false
+	a.mu.Unlock()
 }
 
 // ---- 加入房间瞬态重试（对齐模组 ConnectionManager.java:156-157/14891-14930 + RoomManager.java:88） ----
@@ -811,10 +855,19 @@ func (a *App) JoinRoom(reqJSON string) string {
 		return wrapErr("INVALID_PARAMS", "房间码必须为 6 位（字符集 A-Z 去掉 I/O、2-9 去掉 0/1）")
 	}
 
-	// 会话互斥：hosting/in_room 时拒绝加入。
+	// 会话互斥 + 占位：加入重试链要跑几十秒，这期间必须挡住第二次加入/建房（见 requireIdleSession）。
 	if msg := requireIdleSession(a); msg != "" {
 		return msg
 	}
+	sessionStarted := false
+	defer func() {
+		if !sessionStarted {
+			a.releaseSessionSlot()
+			// 加入没成：撤销日志上传登记（模组 AttemptingJoinScreen.java:249 的 cancelJoin 同款，
+			// 注释原文"否则 90s 后 runUpload 照跑，玩家取消了还上传日志"）
+			a.logUploadDisarm()
+		}
+	}()
 
 	// 新一轮加入：代数 +1（模组 startVoxLinkP2P 的 joinAttemptGeneration.incrementAndGet()，
 	// ConnectionManager.java:14892）。leaveInternal 同样 bump，令旧链放弃。
@@ -889,6 +942,7 @@ func (a *App) JoinRoom(reqJSON string) string {
 		room["clientType"] = "app"
 	}
 	applyFedJoinPayload(room) // join 回包里的 fedAddress/source（RoomManager.java:766-771）
+	sessionStarted = true
 	a.startSession(req.Code, data.ClientToken, false, room, data.ClientID)
 	a.connectFedIfHappyLink() // HL 房：不打洞不走中继，直接 TCP 转中继（RoomManager.java:827-830）
 
