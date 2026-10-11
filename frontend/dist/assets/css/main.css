@@ -101,6 +101,9 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 
 .hidden { display: none !important; }
+/* 属性形式的 hidden 也要生效：组件类（.pill 等）自带 display，会把浏览器默认的
+   [hidden]{display:none} 覆盖掉，于是"需要密码"这类徽标永远显示（实测加入房间页）。 */
+[hidden] { display: none !important; }
 
 .ico { display: inline-flex; width: 16px; height: 16px; flex: none; }
 .ico svg { width: 100%; height: 100%; }
