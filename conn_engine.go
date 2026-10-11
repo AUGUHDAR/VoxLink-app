@@ -160,6 +160,11 @@ type connEngine struct {
 	// TCP SimOpen（tcp_punch.go）
 	tcpPunchInFlight bool
 	gMyMappedIP      string // guest 本端 STUN 映射 IP（tcp_punch_info 用）
+	gMyMappedPort    int    // guest 本端 STUN 映射端口（tcp_simopen_request 用，CM:7137）
+
+	// 直连波次（conn_wave.go）：模组 RoomInfo 的两个字段在引擎里的落位
+	gHostLocalIp string // 房主内网 IP（CM:2650 setHostLocalIp）
+	gSameCgnat   bool   // 两端映射同一公网 IP（CM:2874/2996 setSameCgnat）
 
 	// host 侧 NAT 分级（TCP punch 门控等）
 	hostNatClass natClass
@@ -322,6 +327,9 @@ func (e *connEngine) teardown() {
 	e.retryRound = 0
 	e.tcpPunchInFlight = false
 	e.gMyMappedIP = ""
+	e.gMyMappedPort = 0
+	e.gHostLocalIp = ""
+	e.gSameCgnat = false
 	e.hostNatClass = natUnknown
 	e.turnInFlight = false
 	e.turnSession = nil
@@ -427,24 +435,25 @@ func (e *connEngine) sendSignal(typ string, data map[string]any, to string) erro
 
 // engineSignals 引擎关心的信令类型。
 var engineSignals = map[string]bool{
-	"join_request":     true,
-	"holepunch_offer":  true,
-	"holepunch_mapped": true,
-	"punch_info":       true,
-	"peer_port":        true,
-	"disconnect":       true,
-	"relay_request":    true,
-	"relay_notify":     true,
-	"relay_accept":     true,
-	"relay_declined":   true,
-	"relay_setup":      true,
-	"relay_ready":      true,
-	"turn_alloc":       true,
-	"turn_ready":       true,
-	"turn_nack":        true,
-	"ice_restart":      true,
-	"tcp_punch_info":   true,
-	"tcp_punch_go":     true,
+	"join_request":        true,
+	"holepunch_offer":     true,
+	"holepunch_mapped":    true,
+	"punch_info":          true,
+	"peer_port":           true,
+	"disconnect":          true,
+	"relay_request":       true,
+	"relay_notify":        true,
+	"relay_accept":        true,
+	"relay_declined":      true,
+	"relay_setup":         true,
+	"relay_ready":         true,
+	"turn_alloc":          true,
+	"turn_ready":          true,
+	"turn_nack":           true,
+	"ice_restart":         true,
+	"tcp_punch_info":      true,
+	"tcp_punch_go":        true,
+	"tcp_simopen_request": true, // Wave2 房客请房主也发起 SimOpen（CM:7142）
 }
 
 // onSignal 把一条信令交给引擎（只处理引擎关心的类型）。
@@ -534,6 +543,10 @@ func (e *connEngine) onSignal(typ, from string, data map[string]any) {
 	case "tcp_punch_go":
 		if !e.roleIsHost() {
 			e.guestOnTcpPunchGo(data)
+		}
+	case "tcp_simopen_request":
+		if e.roleIsHost() {
+			e.hostOnTcpSimopenRequest(from, data)
 		}
 	}
 }
@@ -754,6 +767,10 @@ func (e *connEngine) guestOnOffer(from string, data map[string]any) {
 	if port := sigInt(data, "hostPort"); port > 0 {
 		e.hostPort = port
 	}
+	// CM:2644-2652 offer 里的房主内网 IP 先存下来，Wave1/Wave2 的 CGNAT 分支全靠它。
+	if lip := sigStr(data, "hostLocalIp"); lip != "" {
+		e.gHostLocalIp = lip
+	}
 	if ip := sigStr(data, "hostMappedIp"); ip != "" && sigInt(data, "hostMappedPort") > 0 {
 		// CM:2604 同款地址族过滤：本端没有全局 IPv6 时不采信对端通告的 IPv6 映射，
 		// 否则就是朝发不出去的目标空转几十轮（模组工单 QWA6D3/S822QF 的成因）。
@@ -827,8 +844,14 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 	if mine != nil {
 		e.mu.Lock()
 		e.gMyMappedIP = mine.IP
+		e.gMyMappedPort = mine.Port
 		e.mu.Unlock()
 	}
+	// 直连波次（CM:6819-6900 step0）：与 UDP 打洞并行提交，模组在同一个 step0 里先挂
+	// 直连 future 再起 punch。这里必须在采样之后挂，否则本端映射地址未知，
+	// sameCgnat 判据（CM:2872）算不出来，Wave1 的 CGNAT 分支就永远不进。
+	e.refreshGuestSameCgnat()
+	go e.guestWave1Direct(gen)
 
 	// 对端 NAT 分级：offer 标志（host 自报）> 房间 natType
 	remoteNat := natClassFromRoomType(roomStr(e.app.snapshotRoom(), "natType"))
@@ -1290,6 +1313,12 @@ func (e *connEngine) guestOnMapped(data map[string]any) {
 	}
 	puncher := e.gPuncher
 	e.mu.Unlock()
+
+	// CM:3278-3330：mapped 里带内网 IP 时补存（已设过不覆盖），同 CGNAT 就在打洞进行中
+	// 立刻再朝内网 IP 拨一次；新 mapped 也可能第一次让"两端同公网 IP"成立。
+	e.storeGuestHostLocalIp(sigStr(data, "hostLocalIp"), true, "holepunch_mapped")
+	e.refreshGuestSameCgnat()
+	e.guestCgnatDirectOnMapped()
 
 	select {
 	case e.mappedChan() <- m:

@@ -267,7 +267,8 @@
    *     relayFailedMsgTime / turnFailedMsgTime 沿检测与 elapsed < 3000 可见规则）
    *   - 两条中继道本轮都失败且仍未连上 → 阶段行改说"中继均不可用，继续打洞…"
    *   - 任何阶段 success 到达 → 直接切成功卡
-   *   - 成功卡地址：p2p/direct success → hostIp:port；prelay/turn/fed success → 127.0.0.1:port
+   *   - 成功卡地址：一律用事件里的 address（引擎给的是本机桥口 127.0.0.1:port，
+   *     不是房主地址：应用端 MC 是独立进程，它只会照着地址真连）
    */
 
   // 阶段文案：turn/prelay 取自 lang 键 voxlink.auto_relay.turn / .player（lang/zh_cn.json:464-466），

@@ -4,7 +4,6 @@ package main
 // 断言的键值全部逐字对照 NatLabels.java:30-50 与 app-desktop/lang/en_us.json。
 
 import (
-	"encoding/json"
 	"os"
 	"strings"
 	"sync"
@@ -41,9 +40,10 @@ func TestNatLangKeysAllExistInLangFile(t *testing.T) {
 	if err != nil {
 		t.Skip("lang/en_us.json 不可读（工作目录不是包目录）")
 	}
-	var table map[string]string
-	if err := json.Unmarshal(data, &table); err != nil {
-		t.Fatalf("lang/en_us.json 解析失败: %v", err)
+	// lang/*.json 自 1.2.0 起是分组嵌套结构，查键必须走与运行时同一条展平路径
+	table := flattenLangJSON(data)
+	if table == nil {
+		t.Fatalf("lang/en_us.json 解析失败")
 	}
 	var keys []string
 	for _, v := range natRawToLangKey {
