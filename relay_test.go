@@ -178,3 +178,33 @@ func TestHostOnRelayAcceptForwardsConnected(t *testing.T) {
 		t.Fatalf("non-mux candidate must not report connected, signals=%+v", got)
 	}
 }
+
+// 注册进候选池时上报的 natType：判 cone 必须连公网 IP 一起比。
+// 服务端候选门槛是"含 sym 的不进池"（relaymanager.go:343），
+// 所以把对称 NAT 报错成 cone 不是显示问题，而是让别人把流量投递到一台收不到包的候选上。
+func TestNatTypeFromSamplesRequiresPublicIPEquality(t *testing.T) {
+	sa := func(ip string, port int) stunMappedAddr { return stunMappedAddr{IP: ip, Port: port} }
+	cases := []struct {
+		name   string
+		sample []stunMappedAddr
+		want   string
+	}{
+		{"同 IP 同端口", []stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20000)}, "full_cone"},
+		{"同 IP 漂移", []stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20400)}, "symmetric"},
+		{"异 IP 同端口", []stunMappedAddr{sa("1.1.1.1", 20000), sa("2.2.2.2", 20000)}, "symmetric"},
+		{"单样本", []stunMappedAddr{sa("1.1.1.1", 20000)}, "unknown"},
+		{"无样本", nil, "unknown"},
+	}
+	for _, c := range cases {
+		if got := natTypeFromSamples(c.sample, ""); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+	// 无样本才用旧值兜底（有样本时旧值不能盖掉实测结果）
+	if got := natTypeFromSamples(nil, "full_cone"); got != "full_cone" {
+		t.Errorf("空样本应沿用旧值, got %q", got)
+	}
+	if got := natTypeFromSamples([]stunMappedAddr{sa("1.1.1.1", 20000), sa("2.2.2.2", 20000)}, "full_cone"); got != "symmetric" {
+		t.Errorf("有样本时旧值不该盖掉实测, got %q", got)
+	}
+}

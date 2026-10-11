@@ -777,11 +777,7 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 	} else {
 		e.app.netLog("warn", "STUN 探测全部失败，punch_info 不带映射地址")
 	}
-	samplePorts := make([]int, len(samples))
-	for i, s := range samples {
-		samplePorts[i] = s.Port
-	}
-	localNat := natClassFromDelta(samplePorts)
+	localNat := natClassFromDelta(samples)
 	e.mu.Lock()
 	e.gLocalNat = localNat
 	if mine != nil {
@@ -1475,11 +1471,7 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 	if len(samples) > 0 {
 		hostMapped = &samples[0]
 	}
-	samplePorts := make([]int, len(samples))
-	for i, s := range samples {
-		samplePorts[i] = s.Port
-	}
-	hostNat := natClassFromDelta(samplePorts)
+	hostNat := natClassFromDelta(samples)
 	e.mu.Lock()
 	e.hostNatClass = hostNat
 	e.mu.Unlock()

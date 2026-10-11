@@ -683,7 +683,7 @@ func (a *App) CreateRoom(reqJSON string) string {
 
 	// natType 建房请求里先按 "unknown" 发（模组同样是 instant create + NAT probe deferred，
 	// RoomManager.java:161-162：探测放后台，探到再 updateRoom）。
-	// 本端此前在这里同步跑 quickNatType()，最坏会阻塞建房两秒多——现在交给
+	// 本端此前在这里同步做一次端口-only 的轻探测，最坏会阻塞建房两秒多——现在交给
 	// hostSessionStarted 的后台探测（session_wiring.go），与模组同一时序。
 	natType := "unknown"
 

@@ -574,18 +574,30 @@ func TestPortPredictor(t *testing.T) {
 }
 
 func TestNatClassAndStrategyMatrix(t *testing.T) {
-	// §7 派生：NAT 分级（StunProbe 两服务器 delta 法，阈值 100）
-	if got := natClassFromDelta([]int{20000, 20000}); got != natCone {
-		t.Fatalf("equal ports must be cone, got %v", got)
+	// §7 派生：NAT 分级（StunProbe 两服务器比对，927-929 判 cone、986-1000 判 easy/hard）
+	sa := func(ip string, port int) stunMappedAddr { return stunMappedAddr{IP: ip, Port: port} }
+	if got := natClassFromDelta([]stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20000)}); got != natCone {
+		t.Fatalf("同 IP 同端口必须是 cone, got %v", got)
 	}
-	if got := natClassFromDelta([]int{20000, 20050}); got != natEasySym {
-		t.Fatalf("|delta|<100 must be easy sym, got %v", got)
+	if got := natClassFromDelta([]stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20050)}); got != natEasySym {
+		t.Fatalf("同 IP、|delta|<100 才是 easy sym, got %v", got)
 	}
-	if got := natClassFromDelta([]int{20000, 19850}); got != natHardSym {
+	if got := natClassFromDelta([]stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 19850)}); got != natHardSym {
 		t.Fatalf("|delta|>=100 must be hard sym, got %v", got)
 	}
-	if got := natClassFromDelta([]int{20000}); got != natUnknown {
+	if got := natClassFromDelta([]stunMappedAddr{sa("1.1.1.1", 20000)}); got != natUnknown {
 		t.Fatalf("single sample must be unknown, got %v", got)
+	}
+	// 这两条是本轮补的判据：只看端口时都会往"好打"的方向错。
+	if got := natClassFromDelta([]stunMappedAddr{sa("1.1.1.1", 20000), sa("2.2.2.2", 20000)}); got != natHardSym {
+		t.Fatalf("端口相同但公网 IP 不同：模组判对称(StunProbe:927 要 IP 也相等), got %v", got)
+	}
+	if got := natClassFromDelta([]stunMappedAddr{sa("1.1.1.1", 20000), sa("2.2.2.2", 20050)}); got != natHardSym {
+		t.Fatalf("IP 不同一律 hard(StunProbe:986-988 先拦 IP，不看 delta), got %v", got)
+	}
+	// 阈值：两个端口都有效才是 100，否则 200（StunProbe:990）。
+	if got := natClassFromDelta([]stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20150)}); got != natHardSym {
+		t.Fatalf("同 IP、|delta|=150 在 100 阈值下是 hard, got %v", got)
 	}
 
 	// 档位推荐矩阵抽样

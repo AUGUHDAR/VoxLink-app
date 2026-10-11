@@ -68,7 +68,8 @@ func (e *connEngine) relaySelfMapped() *stunMappedAddr {
 	return &m2
 }
 
-// natTypeFromSamples 把样本折算成服务端认的 natType 串：端口一致→cone，漂移→symmetric，无样本→沿用旧值。
+// natTypeFromSamples 把样本折算成服务端认的 natType 串：公网 IP 与端口都一致→cone，
+// 漂移→symmetric，无样本→沿用旧值。
 func natTypeFromSamples(samples []stunMappedAddr, fallback string) string {
 	if len(samples) == 0 {
 		if fallback == "" {
@@ -83,7 +84,12 @@ func natTypeFromSamples(samples []stunMappedAddr, fallback string) string {
 	if len(samples) < 2 {
 		return "unknown"
 	}
-	if stunDeltaFromSamples(samples) == 0 {
+	// 判 cone 必须连公网 IP 一起比（StunProbe:927）：只看端口时，"两台服务器同端口、
+	// 不同公网 IP"会被报成 cone —— 服务端候选池的门槛是"含 sym 的一律不进"
+	// （relaymanager.go:343），于是这台对称 NAT 机器会以"好客"身份被别人选中当中继，
+	// 而它的映射根本收不到别人自外向内的包。
+	a, b := samples[0], samples[len(samples)-1]
+	if a.IP == b.IP && stunDeltaFromSamples(samples) == 0 {
 		return "full_cone"
 	}
 	return "symmetric"

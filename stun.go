@@ -248,21 +248,3 @@ func stunPredictForOffer(uc *net.UDPConn) (delta, r int) {
 	}
 	return reliable, pr.rangeHalf
 }
-
-// quickNatType 建房时的轻量探测：单 socket 多服务器采样，
-// 全部不可达 → "unknown"；端口一致 → "cone"；端口漂移 → "symmetric"。
-func quickNatType() string {
-	uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		return "unknown"
-	}
-	defer uc.Close()
-	samples := stunSampleSeries(uc, stunServers, 2, 1, 1200*time.Millisecond)
-	if len(samples) == 0 {
-		return "unknown"
-	}
-	if stunDeltaFromSamples(samples) == 0 {
-		return "cone"
-	}
-	return "symmetric"
-}

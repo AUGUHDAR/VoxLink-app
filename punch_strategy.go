@@ -1,8 +1,8 @@
 package main
 
 // punch_strategy.go — NAT 分级与打洞策略矩阵（对齐模组 NatClass.java /
-// PunchStrategySelector.java）。NAT 分级取自 StunProbe 两服务器 delta 法：
-// 端口一致 → cone；|delta| < 100 → easySym；否则 hardSym。
+// PunchStrategySelector.java）。NAT 分级取自 StunProbe 两服务器比对：
+// 公网 IP 与端口都相同才是 cone；IP 不同直接 hard；同 IP 时 |delta|<100 才是 easySym。
 
 type natClass int
 
@@ -27,20 +27,39 @@ func (c natClass) String() string {
 
 func (c natClass) symmetric() bool { return c == natEasySym || c == natHardSym }
 
-// natClassFromDelta 两服务器映射端口差分级（StunProbe delta 法语义）。
-// 样本不足 → unknown；端口一致 → cone；|d|<100 → easySym；否则 hardSym。
-func natClassFromDelta(ports []int) natClass {
-	if len(ports) < 2 {
+// natClassFromDelta 两服务器映射比对分级（StunProbe 的 delta 兜底路径：
+// 927-929 判 cone、986-1000 判 easy/hard）。
+//
+// 两个判据都带公网 IP，不是只看端口：
+//   - IP 与端口都相同才是 cone。只看端口时，"对两台服务器映射到同一端口但公网 IP 不同"
+//     会被误判成 cone，而模组在这种情况直接判对称（IP 都换了，映射随目的地变）。
+//   - IP 不同就一定是 hard：模组在 986-988 先拦 IP 不等，压根不看 delta。
+//     旧实现按 |d|<100 判 easySym，等于给跨 IP 的对称 NAT 发了一张"好打"的通行证，
+//     recommendProfile 随之从 HARDSYM 的宽扫掉到窄扫模板，是实打实的连通率退步。
+//
+// 阈值取模组的口径：两个端口都有效才是 100，否则 200（StunProbe:990）。
+// 样本不足两个 → unknown（模组样本缺一律 UNKNOWN）。
+func natClassFromDelta(samples []stunMappedAddr) natClass {
+	if len(samples) < 2 {
 		return natUnknown
 	}
-	delta := ports[len(ports)-1] - ports[0]
-	if delta == 0 {
+	a, b := samples[0], samples[len(samples)-1]
+	if a.IP == b.IP && a.Port == b.Port {
 		return natCone
 	}
-	if delta < 0 {
-		delta = -delta
+	if a.IP != b.IP {
+		return natHardSym
 	}
-	if delta < 100 {
+	twoDiff := b.Port - a.Port
+	absDiff := twoDiff
+	if absDiff < 0 {
+		absDiff = -absDiff
+	}
+	threshold := 100
+	if !(a.Port > 0 && b.Port > 0) {
+		threshold = 200
+	}
+	if absDiff > 0 && absDiff < threshold {
 		return natEasySym
 	}
 	return natHardSym
