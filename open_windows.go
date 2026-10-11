@@ -26,6 +26,7 @@ func (a *App) OpenInBrowser(rawURL string) {
 func openWith(url string, name string, prefix ...string) error {
 	args := append(append([]string{}, prefix...), url)
 	cmd := exec.Command(name, args...)
+	hideChildConsole(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}

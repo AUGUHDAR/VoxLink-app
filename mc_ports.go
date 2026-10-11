@@ -86,6 +86,7 @@ func listJavaByWmic() ([]mcProcEntry, error) {
 	cmd := exec.CommandContext(ctx, "wmic", "process", "where",
 		"name='java.exe' or name='javaw.exe'",
 		"get", "ProcessId,CommandLine", "/FORMAT:CSV")
+	hideChildConsole(cmd) // 启动/检测端口时不该闪黑框
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -151,6 +152,7 @@ func listJavaByPowerShell() ([]mcProcEntry, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command",
 		"Get-CimInstance Win32_Process -Filter \"Name='java.exe' or Name='javaw.exe'\" | Select ProcessId,CommandLine | ConvertTo-Csv -NoTypeInformation")
+	hideChildConsole(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("powershell 执行失败: %w", err)
@@ -257,6 +259,21 @@ func parseNetstatListening(out string) []netstatEntry {
 // ---- 顶层入口 ----
 
 // detectMcPorts 主流程：列 java 进程 → 筛 MC → 取这些 PID 的 LISTENING 端口 → 排序/截断。
+// netstatListening 跑一次 `netstat -ano -p TCP` 并解析出 LISTENING 行。
+// 单独拆出来是为了能被测试直接调用：隐藏控制台那面改动一旦把标准输出弄丢，
+// "没检测到 MC 端口"和"探测根本没工作"在界面上长得一样，只有这条路径能区分。
+func netstatListening() ([]netstatEntry, error) {
+	nctx, ncancel := context.WithTimeout(context.Background(), mcCmdTimeout)
+	defer ncancel()
+	cmd := exec.CommandContext(nctx, "netstat", "-ano", "-p", "TCP")
+	hideChildConsole(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("执行 netstat 失败: %w", err)
+	}
+	return parseNetstatListening(string(out)), nil
+}
+
 func detectMcPorts() ([]mcPortEntry, error) {
 	procs, err := listJavaProcesses()
 	if err != nil {
@@ -278,14 +295,10 @@ func detectMcPorts() ([]mcPortEntry, error) {
 	}
 
 	// 取这些 PID 的 LISTENING 端口
-	nctx, ncancel := context.WithTimeout(context.Background(), mcCmdTimeout)
-	defer ncancel()
-	cmd := exec.CommandContext(nctx, "netstat", "-ano", "-p", "TCP")
-	out, err := cmd.Output()
+	entries, err := netstatListening()
 	if err != nil {
-		return nil, fmt.Errorf("执行 netstat 失败: %w", err)
+		return nil, err
 	}
-	entries := parseNetstatListening(string(out))
 	if len(entries) == 0 {
 		return []mcPortEntry{}, nil
 	}

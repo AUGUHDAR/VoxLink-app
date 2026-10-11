@@ -546,76 +546,13 @@
     });
   }
 
-  /* ---------------- 设置页：MC 实例 + 两个开关 ---------------- */
-  async function renderSettings() {
-    var page = VL.$("#page-settings");
-    if (!page || VL.$("#modsync-settings")) return;
-    var view;
-    try { view = await rawApi("GetModSyncSettings"); } catch (e) { return; }
-    settings = view || settings;
-
-    var card = document.createElement("div");
-    card.className = "card form-card";
-    card.id = "modsync-settings";
-    card.innerHTML =
-      '<div class="card-head"><h2 class="card-title">' + VL.esc(t("voxlink.app.modsync.instance")) + "</h2></div>" +
-      '<div class="field"><label class="field-label" for="ms-dir">mods ' +
-      VL.esc(t("voxlink.modsync.toggle.join")) + "</label>" +
-      '<input class="input" id="ms-dir" placeholder="C:/Users/You/AppData/Roaming/.minecraft/mods"></div>' +
-      '<div class="form-hint">' + VL.esc(t("voxlink.app.modsync.instance_hint")) + "</div>" +
-      '<div class="field"><label class="field-label" for="ms-loader">加载器</label>' +
-      '<input class="input" id="ms-loader" list="ms-loader-list"><datalist id="ms-loader-list">' +
-      '<option value="fabric"></option><option value="neoforge"></option><option value="forge"></option>' +
-      '</datalist></div>' +
-      '<div class="field"><label class="field-label" for="ms-gv">MC 版本</label>' +
-      '<input class="input" id="ms-gv" placeholder="1.20.1"></div>' +
-      '<label class="checkbox"><input type="checkbox" id="ms-join">' +
-      VL.esc(t("voxlink.modsync.toggle.join")) + "</label><br>" +
-      '<label class="checkbox"><input type="checkbox" id="ms-publish">' +
-      VL.esc(t("voxlink.modsync.toggle.publish", "")) + "</label><br>" +
-      '<button class="btn btn-primary" id="ms-save">保存</button>';
-    page.insertBefore(card, page.lastElementChild);
-
-    var active = (view.instances || []).filter(function (i) { return i.name === view.activeInstance; })[0]
-      || (view.instances || [])[0] || {};
-    VL.$("#ms-dir").value = view.modsDir || active.modsDir || "";
-    VL.$("#ms-loader").value = view.loader || active.loader || "fabric";
-    VL.$("#ms-gv").value = view.mcVersion || active.gameVersion || "";
-    VL.$("#ms-join").checked = !!view.joinRequiredModsCheck;
-    VL.$("#ms-publish").checked = !!view.hostModSyncPublish;
-
-    VL.$("#ms-save").addEventListener("click", function () {
-      var modsDir = VL.$("#ms-dir").value.trim();
-      var payload = {
-        instances: modsDir ? [{
-          name: view.activeInstance || "default",
-          loader: VL.$("#ms-loader").value.trim() || "fabric",
-          gameVersion: VL.$("#ms-gv").value.trim(),
-          modsDir: modsDir
-        }] : [],
-        activeInstance: view.activeInstance || "default",
-        joinRequiredModsCheck: VL.$("#ms-join").checked,
-        hostModSyncPublish: VL.$("#ms-publish").checked
-      };
-      rawApi("SaveModSyncSettings", JSON.stringify(payload)).then(function (v) {
-        settings = v || settings;
-        VL.toast("已保存", "success");
-      }, function (e) { if (e.code !== "NO_BACKEND") VL.toast(VL.errText(e), "error"); });
-    });
-  }
-
   /* ---------------- 启动 ---------------- */
   function boot() {
     rawApi("GetModSyncSettings").then(function (v) {
       settings = v || settings;
     }, function () { });
-    var trySettings = function () { renderSettings(); };
-    // 设置页可能被其他任务同时改动：导航到设置页时再补挂一次
-    document.addEventListener("click", function (ev) {
-      var item = ev.target && ev.target.closest ? ev.target.closest(".nav-item") : null;
-      if (item && item.getAttribute("data-page") === "settings") setTimeout(trySettings, 60);
-    });
-    setTimeout(trySettings, 400);
+    // MC 实例与两个必装开关都挪到了「创建房间」页（create.js 负责），
+    // 这里只缓存一份设置给加入侧的门控用。
   }
 
   if (document.readyState === "loading") {

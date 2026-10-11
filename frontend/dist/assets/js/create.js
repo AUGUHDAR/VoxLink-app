@@ -26,6 +26,18 @@
     els.portError = VL.$("#create-port-error");
     els.portRow = VL.$("#create-port-row");
     els.visible = VL.$("#create-visible");
+    els.msPublish = VL.$("#create-ms-publish");
+    els.msJoin = VL.$("#create-ms-join");
+    els.msInstance = VL.$("#create-ms-instance");
+    els.msNew = VL.$("#create-ms-new");
+    els.msDel = VL.$("#create-ms-del");
+    els.msForm = VL.$("#create-ms-form");
+    els.msName = VL.$("#create-ms-name");
+    els.msDir = VL.$("#create-ms-dir");
+    els.msLoader = VL.$("#create-ms-loader");
+    els.msGv = VL.$("#create-ms-gv");
+    els.msSaveNew = VL.$("#create-ms-save-new");
+    els.msCancelNew = VL.$("#create-ms-cancel-new");
     els.warn = VL.$("#create-pw-warn");
     els.error = VL.$("#create-error");
     els.btn = VL.$("#create-btn");
@@ -41,6 +53,107 @@
     if (!els.portError) return;
     els.portError.textContent = msg;
     els.portError.classList.remove("hidden");
+  }
+
+  /* ---------------- 模组同步：MC 实例 + 两个开关 ----------------
+   * 实例（mods 目录 + 加载器 + MC 版本）原来埋在「设置 → MC 实例」里：玩家往往
+   * 同时装了好几个版本的实例，开房时才想起来要选哪个，所以整套挪到建房页，
+   * 并且可以就地新建/删除，下次开房在下拉里直接挑。
+   * 存的是同一份全局设置（SaveModSyncSettings 整体覆盖），因此每次写回都必须
+   * 带上完整的 instances / activeInstance / 两个开关，否则会把别的字段抹掉。 */
+  var msView = null;
+
+  function msInstances() {
+    return (msView && msView.instances) || [];
+  }
+
+  function renderInstances() {
+    if (!els.msInstance) return;
+    var list = msInstances();
+    var active = (msView && msView.activeInstance) || "";
+    var html = '<option value="">不同步模组</option>';
+    list.forEach(function (it) {
+      html += '<option value="' + VL.esc(it.name) + '">' + VL.esc(it.name) +
+        (it.loader || it.gameVersion ? "（" + VL.esc([it.loader, it.gameVersion].filter(Boolean).join(" · ")) + "）" : "") +
+        "</option>";
+    });
+    els.msInstance.innerHTML = html;
+    els.msInstance.value = list.some(function (it) { return it.name === active; }) ? active : "";
+    if (els.msDel) els.msDel.disabled = !els.msInstance.value;
+  }
+
+  function loadModSync() {
+    if (!els.msInstance) return;
+    VL.api("GetModSyncSettings").then(function (v) {
+      msView = v || null;
+      renderInstances();
+      els.msPublish.checked = !(msView && msView.hostModSyncPublish === false);
+      els.msJoin.checked = !(msView && msView.joinRequiredModsCheck === false);
+    }, function () { /* 后端不可用时保持默认，不打扰玩家 */ });
+  }
+
+  // patch 只带要改的字段，其余按当前值原样回写
+  function saveModSync(patch) {
+    var payload = {
+      instances: msInstances(),
+      activeInstance: (msView && msView.activeInstance) || "",
+      joinRequiredModsCheck: !!(msView && msView.joinRequiredModsCheck !== false),
+      hostModSyncPublish: !!(msView && msView.hostModSyncPublish !== false)
+    };
+    Object.keys(patch || {}).forEach(function (k) { payload[k] = patch[k]; });
+    return VL.api("SaveModSyncSettings", JSON.stringify(payload)).then(function (v) {
+      msView = v || msView;
+      renderInstances();
+      return v;
+    }, function (e) {
+      if (e && e.code !== "NO_BACKEND") VL.toast(VL.errText(e), "error");
+    });
+  }
+
+  function showInstanceForm(show) {
+    if (!els.msForm) return;
+    els.msForm.classList.toggle("hidden", !show);
+    if (show) els.msName.focus();
+  }
+
+  function bindModSync() {
+    if (!els.msInstance) return;
+    els.msInstance.addEventListener("change", function () {
+      saveModSync({ activeInstance: els.msInstance.value });
+    });
+    els.msPublish.addEventListener("change", function () {
+      saveModSync({ hostModSyncPublish: !!els.msPublish.checked });
+    });
+    els.msJoin.addEventListener("change", function () {
+      saveModSync({ joinRequiredModsCheck: !!els.msJoin.checked });
+    });
+    els.msNew.addEventListener("click", function () { showInstanceForm(true); });
+    els.msCancelNew.addEventListener("click", function () { showInstanceForm(false); });
+    els.msDel.addEventListener("click", function () {
+      var name = els.msInstance.value;
+      if (!name) return;
+      var rest = msInstances().filter(function (it) { return it.name !== name; });
+      saveModSync({ instances: rest, activeInstance: "" }).then(function () {
+        VL.toast("已删除实例「" + name + "」", "success");
+      });
+    });
+    els.msSaveNew.addEventListener("click", function () {
+      var name = els.msName.value.trim();
+      var dir = els.msDir.value.trim();
+      if (!name) { VL.toast("给实例起个名字", "error"); return; }
+      if (!dir) { VL.toast("要填 mods 目录", "error"); return; }
+      var list = msInstances().filter(function (it) { return it.name !== name; });
+      list.push({
+        name: name,
+        loader: els.msLoader.value || "fabric",
+        gameVersion: els.msGv.value.trim(),
+        modsDir: dir
+      });
+      saveModSync({ instances: list, activeInstance: name }).then(function () {
+        showInstanceForm(false);
+        VL.toast("已保存实例「" + name + "」", "success");
+      });
+    });
   }
 
   // 有密码 → 自动大厅隐藏并提示
@@ -266,14 +379,18 @@ function resolveLoader() {
     els.version.addEventListener("keydown", function (ev) { if (ev.key === "Enter") create(); });
     els.categoryCustom.addEventListener("keydown", function (ev) { if (ev.key === "Enter") create(); });
 
+    bindModSync();
+
     syncVisible();
     syncCategoryCustom();
     renderPortState();
+    loadModSync();
   };
 
-  // 进入创建页时被 app.js 调用：触发自动检测
+  // 进入创建页时被 app.js 调用：触发自动检测 + 刷新模组同步设置
   VL.createAutoDetect = function () {
     autoDetectOnEnter();
+    loadModSync();
   };
 
   VL.resetCreateForm = function () {

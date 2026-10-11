@@ -202,6 +202,60 @@
             </div>
             <label class="switch"><input type="checkbox" id="create-visible" checked><span class="slider"></span></label>
           </div>
+          <div class="field">
+            <label class="field-label" for="create-ms-instance">MC 实例（mods 目录）</label>
+            <div class="port-row">
+              <select class="select" id="create-ms-instance"></select>
+              <button type="button" class="btn btn-ghost btn-sm" id="create-ms-new">新建</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="create-ms-del" disabled>删除</button>
+            </div>
+            <p class="form-hint">选了实例才会把你的必装清单同步给房客、加入别人房间时才会比对清单；不需要同步就留「不同步模组」。</p>
+          </div>
+          <div class="field hidden" id="create-ms-form">
+            <div class="field-label">新实例</div>
+            <div class="field-row">
+              <div class="field">
+                <label class="field-label" for="create-ms-name">实例名</label>
+                <input type="text" class="input" id="create-ms-name" placeholder="例如 1.20.1 科技服" maxlength="24" autocomplete="off">
+              </div>
+              <div class="field">
+                <label class="field-label" for="create-ms-loader">加载器</label>
+                <select class="select" id="create-ms-loader">
+                  <option value="fabric">fabric</option>
+                  <option value="forge">forge</option>
+                  <option value="neoforge">neoforge</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="create-ms-dir">mods 目录</label>
+              <input type="text" class="input" id="create-ms-dir" placeholder="C:/Users/You/AppData/Roaming/.minecraft/mods" autocomplete="off">
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label class="field-label" for="create-ms-gv">MC 版本</label>
+                <input type="text" class="input" id="create-ms-gv" placeholder="1.20.1" maxlength="16" autocomplete="off">
+              </div>
+              <div class="field ms-actions">
+                <button type="button" class="btn btn-ghost" id="create-ms-save-new">保存实例</button>
+                <button type="button" class="btn btn-ghost" id="create-ms-cancel-new">取消</button>
+              </div>
+            </div>
+          </div>
+          <div class="field switch-field">
+            <div>
+              <div class="field-label">上报必装 Mod 给房客</div>
+              <div class="field-sub">开房后把本端必装清单同步给加入者，帮他们对齐版本</div>
+            </div>
+            <label class="switch" title="只影响这间房：房客进入前会比对你的必装清单"><input type="checkbox" id="create-ms-publish" checked><span class="slider"></span></label>
+          </div>
+          <div class="field switch-field">
+            <div>
+              <div class="field-label">加入前检查必装 Mod</div>
+              <div class="field-sub">这条管的是你加入别人房间：先比对清单，缺了提示下载</div>
+            </div>
+            <label class="switch" title="只影响你加入别人房间时要不要先查清单"><input type="checkbox" id="create-ms-join" checked><span class="slider"></span></label>
+          </div>
           <div class="form-warn hidden" id="create-pw-warn">设置了密码，房间创建时会自动大厅隐藏哦</div>
           <div class="form-error hidden" id="create-error"></div>
           <button class="btn btn-primary btn-lg btn-block" id="create-btn">
