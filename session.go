@@ -674,14 +674,21 @@ func (s *session) wsLoop() error {
 				id = *f.ID
 			}
 			// 服务端主动推送帧：id==0 且带 push 字段（Java:418-439）。
-			// lobby 推送是模组大厅 UI 的刷新事件（LobbyPush），本 App 大厅列表走轮询、
-			// 无对应消费者，等价忽略。
+			// 必须先确认这帧的 data 里真的带 s 数组再交给信令管线——模组的门是
+			// RoomManager.java:1791-1796 `if (!data.get(sigKey).isJsonArray()) return;`：
+			// lobby 推送的 data 只有 {"ts":服务端此刻}，缺了这道门就会把 since 顶到未来，
+			// 于是"比 lobby 推送更早写入"的信令被永久跳过（现网表现：join_request/punch_info 收不到）。
 			if id == 0 && f.Push != "" {
-				var sd signalsData
-				if json.Unmarshal(f.Data, &sd) == nil {
-					s.handleSignals(sd)
+				var probe struct {
+					S *[]signalMsg `json:"s"`
 				}
-				continue
+				if json.Unmarshal(f.Data, &probe) == nil && probe.S != nil {
+					var sd signalsData
+					if json.Unmarshal(f.Data, &sd) == nil {
+						s.handleSignals(sd)
+					}
+				}
+				continue // lobby 推送：本 App 大厅列表走轮询，无对应消费者，等价忽略
 			}
 			if id < 0 {
 				continue // 无 id 帧：Java 按 -1 查 pending 不命中后丢弃（:418、:440-444）

@@ -286,3 +286,117 @@ func TestWSSafetyNetPollsHTTPWhileWsHealthy(t *testing.T) {
 		t.Fatal("安全网一次都没跑过 HTTP 轮询")
 	}
 }
+
+// lobby 推送只带 {"ts":服务端此刻}。旧写法把它当信令推进 since，于是"比这帧更早写入"的
+// 真信令被永久跳过——模组靠 RoomManager.java:1791-1796 的 isJsonArray 门挡住。
+// 这条用例钉的就是这个顺序：先推一帧 lobby（ts=T+500），再推一帧信令（timestamp=T）。
+func TestLobbyPushMustNotAdvanceSignalCursor(t *testing.T) {
+	base := time.Now().UnixMilli()
+	var mu sync.Mutex
+	var pollSince []int64
+	pushed := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		ctx := context.Background()
+		writer := func(obj any) { out, _ := json.Marshal(obj); _ = conn.Write(ctx, websocket.MessageText, out) }
+		sendPushes := func() {
+			mu.Lock()
+			if pushed {
+				mu.Unlock()
+				return
+			}
+			pushed = true
+			mu.Unlock()
+			// 1) lobby 推送：data 里没有 s 数组，只有服务端此刻的 ts
+			writer(map[string]any{"id": 0, "push": "lobby", "success": true,
+				"data": map[string]any{"ts": base + 500}})
+			// 2) 紧接着一封真信令，timestamp 比那帧 lobby 的 ts 更早
+			writer(map[string]any{"id": 0, "push": "signals", "success": true,
+				"data": map[string]any{
+					"s": []any{map[string]any{
+						"id": "sig-1", "from": "host", "type": "peer_port",
+						"data":      map[string]any{"peer_ip": "203.0.113.11", "peer_port": 25565},
+						"timestamp": base,
+					}},
+					"ts": base,
+				}})
+		}
+		go func() {
+			for {
+				_, data, err := conn.Read(ctx)
+				if err != nil {
+					return
+				}
+				var fr map[string]any
+				if json.Unmarshal(data, &fr) != nil {
+					continue
+				}
+				id, _ := fr["id"].(float64)
+				if rt, _ := fr["route"].(string); rt == "/signal/poll" {
+					if b, ok := fr["body"].(map[string]any); ok {
+						if v, ok := b["since"].(float64); ok {
+							mu.Lock()
+							pollSince = append(pollSince, int64(v))
+							n := len(pollSince)
+							mu.Unlock()
+							if n >= 2 {
+								sendPushes()
+							}
+						}
+					}
+				}
+				writer(map[string]any{"id": int64(id), "success": true,
+					"data": map[string]any{"s": []any{}, "ts": base - 9000}})
+			}
+		}()
+		for {
+			time.Sleep(200 * time.Millisecond)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	a, sink := newAutoRelayTestApp(t)
+	a.settings.ServerURL = srv.URL
+	s := newSession(a, "EF6789", "tok", false)
+	a.setState("in_room", "EF6789", "tok", false, map[string]any{"code": "EF6789"}, s)
+
+	done := make(chan struct{})
+	go func() { _ = s.wsLoop(); close(done) }()
+	t.Cleanup(func() {
+		s.stop()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+	})
+
+	// wsPollInterval=5s：要采到"推送之后再发出去的那一帧"，至少得等过 4 个周期
+	waitFor(t, 30*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(pollSince) >= 4
+	}, "没采到足够多的轮询帧")
+	mu.Lock()
+	defer mu.Unlock()
+	// 真信令的最大 timestamp 就是 base；游标越过它说明 lobby 推送那帧被当成了信令，
+	// 之后服务端按 ts>since 过滤，比它早的信令就再也拉不到了。
+	for i, v := range pollSince {
+		if v > base+1 {
+			t.Fatalf("第 %d 帧 poll 的 since=%d 越过了真实信令的最大时间戳 %d（lobby 推送顶上去的，差 %dms）",
+				i+1, v, base, v-base)
+		}
+	}
+	if !containsStr(sinkTypes(sink), "peer_port") {
+		t.Error("真信令本身也要派发出去（不能把 signals 帧一起挡掉）")
+	}
+}
