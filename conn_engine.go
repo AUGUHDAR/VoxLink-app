@@ -162,13 +162,17 @@ type connEngine struct {
 	tcpPunchInFlight bool
 	tcpPunchToken    int64 // 邀约轮次令牌：35s 看门狗只清自己那一轮的占位
 	tcpPunchers      []*tcpPuncher
-	relayPrefetched  bool // CM:6576 relayPrefetchFuture==null 的等价门（一次进程只预热一次）
+	relayPrefetched  bool   // CM:6576 relayPrefetchFuture==null 的等价门（一次进程只预热一次）
 	gMyMappedIP      string // guest 本端 STUN 映射 IP（tcp_punch_info 用）
 	gMyMappedPort    int    // guest 本端 STUN 映射端口（tcp_simopen_request 用，CM:7137）
 
 	// 直连波次（conn_wave.go）：模组 RoomInfo 的两个字段在引擎里的落位
-	gHostLocalIp string // 房主内网 IP（CM:2650 setHostLocalIp）
-	gSameCgnat   bool   // 两端映射同一公网 IP（CM:2874/2996 setSameCgnat）
+	gHostLocalIp         string                        // 房主内网 IP（CM:2650 setHostLocalIp）
+	gSameCgnat           bool                          // 两端映射同一公网 IP（CM:2874/2996 setSameCgnat）
+	gHostMappedPorts     []int                         // 房主公布的映射端口列表（CM:3160-3180，生日打洞的输入）
+	gLastHostMappedPorts []int                         // 上一次收到的那串，用于漂移判定（CM:3186 lastHostMappedPorts）
+	gExtraPunchers       map[string]*guestExtraPuncher // CM:3418-3432 的 joiner_extra_*
+	gPunchTemplate       *guestPunchTemplate           // 当前轮档位/参数/密钥，extras 用同一条模板
 
 	// host 侧 NAT 分级（TCP punch 门控等）
 	hostNatClass natClass
@@ -314,6 +318,10 @@ func (e *connEngine) teardown() {
 	}
 	hTcpPairs := e.hTcpPairs
 	tcpPunchers := e.tcpPunchers
+	var extraPunchers []*guestExtraPuncher
+	for _, ep := range e.gExtraPunchers {
+		extraPunchers = append(extraPunchers, ep)
+	}
 	// 断开通知所需快照（复位前抓取；复位后 postSignal 读不到会话字段）
 	sendBye := e.sess != nil && e.code != "" && e.token != ""
 	byeCode, byeToken, byeBase := e.code, e.token, e.app.baseURL()
@@ -350,6 +358,10 @@ func (e *connEngine) teardown() {
 	e.gMyMappedPort = 0
 	e.gHostLocalIp = ""
 	e.gSameCgnat = false
+	e.gHostMappedPorts = nil
+	e.gLastHostMappedPorts = nil
+	e.gExtraPunchers = nil
+	e.gPunchTemplate = nil
 	e.hostNatClass = natUnknown
 	e.turnInFlight = false
 	e.turnSession = nil
@@ -415,6 +427,11 @@ func (e *connEngine) teardown() {
 	}
 	for _, tp := range tcpPunchers {
 		tp.stop()
+	}
+	// 生日打洞的每一路都有自己的 socket，退房时必须一起收（模组的 activeHolePunchers
+	// 在 stopAllConnectionWork 里全数 cancel+close）
+	for _, ep := range extraPunchers {
+		e.closeExtraPuncher(ep)
 	}
 	if rPuncher != nil {
 		rPuncher.stop()
@@ -660,6 +677,19 @@ func sigInts(data map[string]any, key string) []int {
 	return out
 }
 
+// intSlicesEqual 逐位比较（模组用 List.equals 判"房主端口漂移是否同一串"，CM:3186）。
+func intSlicesEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func sigBool(data map[string]any, key string) bool {
 	if v, ok := data[key].(bool); ok {
 		return v
@@ -838,6 +868,230 @@ func (e *connEngine) shouldPrefetchRelay(local, remote natClass) bool {
 		return false
 	}
 	return local.symmetric() || remote.symmetric() || e.gSameCgnat
+}
+
+// guestPunchTemplate 当前打洞轮的模板快照（模组的 this.punchProfile() + activePunchParams
+// + 认证密钥），CM:3422-3424 给 extra puncher 调 applyPunchTemplate 用的就是这一份。
+type guestPunchTemplate struct {
+	gen     int
+	profile *punchProfile
+	params  *punchParams
+	authKey []byte
+}
+
+// guestExtraPuncher 一路生日端口 puncher（CM:3412-3432 的 joiner_extra_i），自带 socket。
+type guestExtraPuncher struct {
+	key    string
+	p      *puncher
+	sock   *net.UDPConn
+	port   int
+	closed atomic.Bool
+}
+
+// guestCloseExtraPunchers CM:3356-3400：房主端口漂移后，旧的 extra 全数撤掉，
+// 由最新那串端口重建（留着它们只会继续朝已作废的端口喷洒）。
+func (e *connEngine) guestCloseExtraPunchers(reason string) {
+	e.mu.Lock()
+	var stale []*guestExtraPuncher
+	for k, ep := range e.gExtraPunchers {
+		if strings.HasPrefix(k, "joiner_extra_") {
+			stale = append(stale, ep)
+			delete(e.gExtraPunchers, k)
+		}
+	}
+	e.mu.Unlock()
+	if len(stale) == 0 {
+		return
+	}
+	e.app.netLog("info", fmt.Sprintf("端口漂移(%s)：撤掉 %d 路旧的生日 puncher，按最新端口重建", reason, len(stale)))
+	for _, ep := range stale {
+		e.closeExtraPuncher(ep)
+	}
+}
+
+// closeExtraPuncher 幂等收尾：cancel 只关未赢 socket，本路 socket 由这里统一关。
+func (e *connEngine) closeExtraPuncher(ep *guestExtraPuncher) {
+	// ep.p == nil 是"已占位、puncher 还没建起来"的那一路，没什么可关
+	if ep == nil || ep.p == nil || !ep.closed.CompareAndSwap(false, true) {
+		return
+	}
+	ep.p.cancel()
+	if ep.sock != nil {
+		_ = ep.sock.Close()
+	}
+}
+
+// guestSpawnExtraPunchers CM:3406-3425：同 CGNAT 回环命中率低，生日端口覆盖加密到 12 路；
+// 其余场景 6 路。第 0 个端口由主 puncher 打，这里从第 1 个开始，同 key 已存在就不重开。
+// socket 与 puncher 在锁内建好再登记（CM:3428-3432 的 createSocket+put 也是同步做的），
+// 这样表里永远只有"真家伙"，端口漂移时关的就是这一批。
+func (e *connEngine) guestSpawnExtraPunchers(ip string, ports []int) {
+	e.mu.Lock()
+	tpl := e.gPunchTemplate
+	done := e.gP2PDone
+	sess := e.sess
+	sameCgnat := e.gSameCgnat
+	gen := e.gCycle
+	if e.gExtraPunchers == nil {
+		e.gExtraPunchers = map[string]*guestExtraPuncher{}
+	}
+	e.mu.Unlock()
+	if tpl == nil || sess == nil || done || len(ports) < 2 || ip == "" {
+		return
+	}
+	maxExtraCap := 6
+	if sameCgnat {
+		maxExtraCap = 12
+	}
+	maxExtra := min(len(ports), maxExtraCap)
+	for i := 1; i < maxExtra; i++ {
+		key := fmt.Sprintf("joiner_extra_%d", i)
+		target := &net.UDPAddr{IP: net.ParseIP(ip), Port: ports[i]}
+		if target.IP == nil {
+			continue
+		}
+		e.mu.Lock()
+		if e.gP2PDone || e.sess == nil || gen != e.gCycle {
+			e.mu.Unlock()
+			return
+		}
+		if _, exists := e.gExtraPunchers[key]; exists {
+			e.mu.Unlock()
+			continue
+		}
+		sock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if err != nil {
+			e.mu.Unlock()
+			continue // CM:3428-3431：建 socket 失败这一路直接跳过
+		}
+		p := newPuncher(sock, tpl.profile, tpl.params, tpl.authKey)
+		p.setLogf(e.app.netLog)
+		p.setTarget(target)
+		ep := &guestExtraPuncher{key: key, p: p, sock: sock, port: ports[i]}
+		e.gExtraPunchers[key] = ep
+		e.mu.Unlock()
+		e.app.netLog("info", fmt.Sprintf("Multi-port puncher %s: %s:%d", key, ip, ports[i]))
+		go e.runGuestExtraPunch(gen, ep, ip, ports[i], tpl)
+	}
+}
+
+// runGuestExtraPunch 一路生日 puncher 的一生：朝第 i 个端口喷洒 →
+// 赢就走与主 puncher 完全同一段收尾（guestWinP2P），败就摘登记并记账（CM:3446-3541）。
+func (e *connEngine) runGuestExtraPunch(gen int, ep *guestExtraPuncher, ip string, port int, tpl *guestPunchTemplate) {
+	res := ep.p.punchPrediction(port, tpl.profile.joinerMultiPortRange, false)
+	if res != nil && (res.recvPunch > 0 || res.recvAck > 0) {
+		// CM:3452-3464：失败样本回灌给终局判定（整会话"收到过对端包"这一条门就是它撑的）
+		e.mu.Lock()
+		e.punchRecvEver = true
+		e.mu.Unlock()
+	}
+	if res != nil && res.success {
+		e.guestWinP2P(gen, ep.p, ep.sock, tpl.authKey) // 内部负责 cancel 与 socket 归属
+		e.dropExtraPuncherByKey(ep.key, ep)
+		return
+	}
+	e.closeExtraPuncher(ep)
+	e.dropExtraPuncherByKey(ep.key, ep)
+}
+
+// dropExtraPuncherByKey 仅当表里还是这一路时才摘（漂移重建后不能误删新那一路）。
+func (e *connEngine) dropExtraPuncherByKey(key string, ep *guestExtraPuncher) {
+	e.mu.Lock()
+	if cur, ok := e.gExtraPunchers[key]; ok && (ep == nil || cur == ep) {
+		delete(e.gExtraPunchers, key)
+	}
+	e.mu.Unlock()
+}
+
+// guestWinP2P 打洞成功后的收尾：CAS 占位 → rudp 承载 → 本地桥 → 成功事件。
+// 主 puncher 与 CM:3406-3425 的 joiner_extra_* 生日 puncher 共用这一段（模组两边都调
+// establishUdpTransport），所以必须是同一个函数体而不是两份复制。
+// 语句与原内联块逐条相同（重构为函数，非改写）。
+func (e *connEngine) guestWinP2P(gen int, p *puncher, sock *net.UDPConn, authKey []byte) {
+	winConn, actual := p.win()
+	if winConn == nil {
+		winConn = sock
+	}
+	if !e.genValid(gen) {
+		p.cancel()
+		_ = winConn.Close()
+		e.closeGuestPunchSock(sock)
+		return
+	}
+	e.mu.Lock()
+	alreadyDone := e.gP2PDone
+	if !alreadyDone {
+		e.gPuncher = nil
+		e.gPunchSock = nil
+	}
+	e.mu.Unlock()
+	if alreadyDone {
+		p.cancel()
+		_ = winConn.Close()
+		e.closeGuestPunchSock(sock)
+		return
+	}
+
+	rc := newRudp(winConn, actual)
+	if authKey != nil {
+		// 直连路径绝不开认证降级（ReliableUdpTransport.java:366-369 的注释就是规则本身：
+		// "仅 TURN 路径开启…直连 P2P 路径保持严格认证不受影响"）。
+		// 降级后源地址重绑仍生效，等于让"能往这个已打洞 UDP 口塞 3 个伪造包的人"
+		// 永久解除本端认证。
+		rc.setAuthKey(authKey, false)
+	}
+	rc.setOnRestart(func() { e.guestIceRestart() })
+	// 玩家中继 v2：双方都声明 relayMuxV1 才 mux 化，且必须在 Start 之前（模组 RUDP:160）。
+	setupRelayMux(rc, hostSupportsCap(e.app.snapshotRoom(), relayMuxCapability), e.app.netLog, "guest", "joiner")
+	// 载具热切优先（模组 startUdpPunchBridge 的第一个分支，CM:14949-14957）：
+	// 旧道被判"建立但死"、新道到了 → 不新建本地桥，只换承载并重放上行日志，
+	// MC 那条 TCP 全程不动。swapJoinerCarrier 内部会 start() 新承载，所以这里必须排在 rc.Start() 之前。
+	if e.tryCarrierSwap(rc) {
+		p.cancel()
+		if winConn != sock {
+			_ = sock.Close()
+		}
+		e.app.netLog("info", "P2P 新承载已热切，本地桥与 MC 连接不动")
+		return
+	}
+	rc.Start()
+	bridgeAddr, bridge, berr := startGuestBridge(rc, func() { e.guestBridgeDown() })
+	if berr != nil {
+		p.cancel()
+		_ = rc.Close()
+		e.closeGuestPunchSock(sock)
+		e.notifyState(phaseP2P, statusFailed, "", "本地桥建立失败："+berr.Error())
+		return
+	}
+	e.mu.Lock()
+	// 写回屏障与写回同锁：建桥期间可能已退房（sess=nil）、已改道（gP2PDone）
+	// 或已重开一轮（gCycle 变了）。旧写法只判 gP2PDone，而复位会把它清回 false，
+	// 于是往已拆掉的引擎上挂 rudp/bridge → 三个 goroutine + 一个 TCP 监听口留到进程退出。
+	if e.gP2PDone || e.sess == nil || gen != e.gCycle {
+		e.mu.Unlock()
+		p.cancel()
+		_ = rc.Close()
+		if bridge != nil {
+			bridge.stop()
+		}
+		e.closeGuestPunchSock(sock)
+		e.app.netLog("warn", "P2P 隧道建立过晚（本端已改道/已退房/已重开一轮），丢弃")
+		return
+	}
+	e.gRudp = rc
+	e.gBridge = bridge
+	e.gP2PDone = true
+	e.mu.Unlock()
+	p.cancel() // 关掉组内未赢 socket（winConn 除外）
+	if winConn != sock {
+		_ = sock.Close()
+	}
+	e.app.netLog("info", "P2P 打洞成功，rudp 隧道已建立")
+	// 成功卡上的地址必须是**本机桥接口**，不能是房主的 hostIp:hostPort：
+	// 模组里 MC 在进程内，它的连接会被模组钩住再转隧道，所以能给房主地址；
+	// 应用端 MC 是独立进程，它只会照着地址真连公网 —— 打不通，表现就是
+	// "连接已打通"而 MC 报 Connection timed out: getsockopt。
+	e.notifyState(phaseP2P, statusSuccess, bridgeAddr, "")
 }
 
 // guestPunchFlow guest 打洞主流程（对齐模组 ConnectionManager 打洞编排）：
@@ -1119,6 +1373,10 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 		p := newPuncher(sock, profile, params, authKey)
 		p.setLogf(e.app.netLog)
 		p.setTarget(curTarget)
+		// 快照本轮模板：CM:3422-3424 的 extra puncher 走的是同一份档位/参数/密钥
+		e.mu.Lock()
+		e.gPunchTemplate = &guestPunchTemplate{gen: gen, profile: profile, params: params, authKey: authKey}
+		e.mu.Unlock()
 		p.setOnPeer(punchOnPeer)
 		e.mu.Lock()
 		e.gPuncher = p
@@ -1169,91 +1427,10 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 		}
 
 		if res != nil && res.success {
-			winConn, actual := p.win()
-			if winConn == nil {
-				winConn = sock
-			}
-			if !e.genValid(gen) {
-				p.cancel()
-				_ = winConn.Close()
-				e.closeGuestPunchSock(sock)
-				return
-			}
 			e.mu.Lock()
-			alreadyDone = e.gP2PDone
-			if !alreadyDone {
-				e.gPuncher = nil
-				e.gPunchSock = nil
-			}
 			hostIp, hostPort = e.hostIp, e.hostPort
 			e.mu.Unlock()
-			if alreadyDone {
-				p.cancel()
-				_ = winConn.Close()
-				e.closeGuestPunchSock(sock)
-				return
-			}
-
-			rc := newRudp(winConn, actual)
-			if authKey != nil {
-				// 直连路径绝不开认证降级（ReliableUdpTransport.java:366-369 的注释就是规则本身：
-				// "仅 TURN 路径开启…直连 P2P 路径保持严格认证不受影响"）。
-				// 降级后源地址重绑仍生效，等于让"能往这个已打洞 UDP 口塞 3 个伪造包的人"
-				// 永久解除本端认证。
-				rc.setAuthKey(authKey, false)
-			}
-			rc.setOnRestart(func() { e.guestIceRestart() })
-			// 玩家中继 v2：双方都声明 relayMuxV1 才 mux 化，且必须在 Start 之前（模组 RUDP:160）。
-			setupRelayMux(rc, hostSupportsCap(e.app.snapshotRoom(), relayMuxCapability), e.app.netLog, "guest", "joiner")
-			// 载具热切优先（模组 startUdpPunchBridge 的第一个分支，CM:14949-14957）：
-			// 旧道被判"建立但死"、新道到了 → 不新建本地桥，只换承载并重放上行日志，
-			// MC 那条 TCP 全程不动。swapJoinerCarrier 内部会 start() 新承载，所以这里必须排在 rc.Start() 之前。
-			if e.tryCarrierSwap(rc) {
-				p.cancel()
-				if winConn != sock {
-					_ = sock.Close()
-				}
-				e.app.netLog("info", "P2P 新承载已热切，本地桥与 MC 连接不动")
-				return
-			}
-			rc.Start()
-			bridgeAddr, bridge, berr := startGuestBridge(rc, func() { e.guestBridgeDown() })
-			if berr != nil {
-				p.cancel()
-				_ = rc.Close()
-				e.closeGuestPunchSock(sock)
-				e.notifyState(phaseP2P, statusFailed, "", "本地桥建立失败："+berr.Error())
-				return
-			}
-			e.mu.Lock()
-			// 写回屏障与写回同锁：建桥期间可能已退房（sess=nil）、已改道（gP2PDone）
-			// 或已重开一轮（gCycle 变了）。旧写法只判 gP2PDone，而复位会把它清回 false，
-			// 于是往已拆掉的引擎上挂 rudp/bridge → 三个 goroutine + 一个 TCP 监听口留到进程退出。
-			if e.gP2PDone || e.sess == nil || gen != e.gCycle {
-				e.mu.Unlock()
-				p.cancel()
-				_ = rc.Close()
-				if bridge != nil {
-					bridge.stop()
-				}
-				e.closeGuestPunchSock(sock)
-				e.app.netLog("warn", "P2P 隧道建立过晚（本端已改道/已退房/已重开一轮），丢弃")
-				return
-			}
-			e.gRudp = rc
-			e.gBridge = bridge
-			e.gP2PDone = true
-			e.mu.Unlock()
-			p.cancel() // 关掉组内未赢 socket（winConn 除外）
-			if winConn != sock {
-				_ = sock.Close()
-			}
-			e.app.netLog("info", "P2P 打洞成功，rudp 隧道已建立")
-			// 成功卡上的地址必须是**本机桥接口**，不能是房主的 hostIp:hostPort：
-			// 模组里 MC 在进程内，它的连接会被模组钩住再转隧道，所以能给房主地址；
-			// 应用端 MC 是独立进程，它只会照着地址真连公网 —— 打不通，表现就是
-			// "连接已打通"而 MC 报 Connection timed out: getsockopt。
-			e.notifyState(phaseP2P, statusSuccess, bridgeAddr, "")
+			e.guestWinP2P(gen, p, sock, authKey)
 			return
 		}
 
@@ -1366,8 +1543,24 @@ func (e *connEngine) guestOnMapped(data map[string]any) {
 		}
 	}
 	puncher := e.gPuncher
+	// CM:3160-3208：房主可以公布一串映射端口（它多 socket STUN 阵列的结果），
+	// 模组据此开 joiner_extra_* 生日打洞（同 CGNAT 上限 12、否则 6，CM:3406-3425）。
+	// 以前应用端整段丢弃，连"对端给了几个端口"都看不见；这里先收下来并记一条。
+	ports := sigInts(data, "hostMappedPorts")
+	if len(ports) == 0 {
+		ports = []int{port} // CM:3178-3180：没给列表就退回单端口
+	}
+	portsChanged := !intSlicesEqual(e.gLastHostMappedPorts, ports)
+	e.gLastHostMappedPorts = append([]int(nil), ports...)
+	e.gHostMappedPorts = ports
 	e.mu.Unlock()
-
+	if len(ports) > 1 && puncher != nil {
+		// CM:3356-3360：端口串变了先撤旧的 extra，再按最新那串重建
+		if portsChanged {
+			e.guestCloseExtraPunchers("holepunch_mapped")
+		}
+		e.guestSpawnExtraPunchers(ip, ports)
+	}
 	// CM:3278-3330：mapped 里带内网 IP 时补存（已设过不覆盖），同 CGNAT 就在打洞进行中
 	// 立刻再朝内网 IP 拨一次；新 mapped 也可能第一次让"两端同公网 IP"成立。
 	e.storeGuestHostLocalIp(sigStr(data, "hostLocalIp"), true, "holepunch_mapped")

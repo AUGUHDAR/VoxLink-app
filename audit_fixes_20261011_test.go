@@ -391,3 +391,342 @@ func TestTopologyPrefetchFiresOnce(t *testing.T) {
 		t.Fatalf("预热应只发一次 /topology/poll，实际 %d 次", got)
 	}
 }
+
+// CM:3160-3208：房主公布的映射端口列表必须收下来（模组据此开生日打洞），
+// 没给列表时退回单端口；漂移判定用逐位比较（Java 的 List.equals）。
+func TestGuestStoresHostMappedPorts(t *testing.T) {
+	my := getLocalIP()
+	if my == "" {
+		t.Skip("本机无可用 IPv4 出口")
+	}
+	a, _ := newAutoRelayTestApp(t)
+	e := a.engine
+
+	e.guestOnMapped(map[string]any{
+		"hostMappedIp":    my,
+		"hostMappedPort":  26001,
+		"hostMappedPorts": []any{float64(26001), float64(26002), float64(26003)},
+	})
+	e.mu.Lock()
+	got := append([]int(nil), e.gHostMappedPorts...)
+	last := append([]int(nil), e.gLastHostMappedPorts...)
+	e.mu.Unlock()
+	if len(got) != 3 || got[0] != 26001 || got[2] != 26003 {
+		t.Fatalf("应存下三个端口，实际 %v", got)
+	}
+	if !intSlicesEqual(got, last) {
+		t.Fatalf("首次收到的那串要成为漂移基准：got=%v last=%v", got, last)
+	}
+
+	// 漂移：换一串 → 基准随之更新
+	e.guestOnMapped(map[string]any{
+		"hostMappedIp":    my,
+		"hostMappedPort":  27001,
+		"hostMappedPorts": []any{float64(27001), float64(27002)},
+	})
+	e.mu.Lock()
+	got2 := append([]int(nil), e.gHostMappedPorts...)
+	last2 := append([]int(nil), e.gLastHostMappedPorts...)
+	e.mu.Unlock()
+	if len(got2) != 2 || !intSlicesEqual(got2, last2) || intSlicesEqual(got, got2) {
+		t.Fatalf("端口漂移没跟住：old=%v new=%v last=%v", got, got2, last2)
+	}
+
+	// 不带列表的旧对端 → 退回单端口（CM:3178-3180）
+	e.guestOnMapped(map[string]any{"hostMappedIp": my, "hostMappedPort": 28001})
+	e.mu.Lock()
+	got3 := append([]int(nil), e.gHostMappedPorts...)
+	e.mu.Unlock()
+	if len(got3) != 1 || got3[0] != 28001 {
+		t.Fatalf("缺列表应退回单端口，实际 %v", got3)
+	}
+}
+
+func TestIntSlicesEqualMatchesListEquals(t *testing.T) {
+	cases := []struct {
+		a, b []int
+		want bool
+	}{
+		{nil, nil, true},
+		{[]int{1, 2}, []int{1, 2}, true},
+		{[]int{1, 2}, []int{1, 2, 3}, false},
+		{[]int{1, 2, 3}, []int{1, 3, 2}, false},
+		{[]int{}, nil, true},
+	}
+	for _, c := range cases {
+		if got := intSlicesEqual(c.a, c.b); got != c.want {
+			t.Errorf("intSlicesEqual(%v,%v)=%v 期望 %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// ---- CM:3406-3425 生日多端口扇出 ----
+
+// fakePunchPeer 起一个"房主映射端口"：收到 PUNCH(56 4C 01) 就回 PUNCH_ACK。
+// testPeerIP 打洞候选里的环回会被 [AddrFilter] 挡掉（真实网络里也不可能朝自己打洞），
+// 所以假房主要绑在本机的 LAN 地址上。
+func testPeerIP(t *testing.T) string {
+	t.Helper()
+	ip := getLocalIP()
+	if ip == "" {
+		t.Skip("本机无可用 IPv4 出口")
+	}
+	return ip
+}
+
+func fakePunchPeer(t *testing.T) int {
+	t.Helper()
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(testPeerIP(t))})
+	if err != nil {
+		t.Fatalf("假房主端口监听失败: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := c.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if n >= 3 && buf[0] == punchMagic0 && buf[1] == punchMagic1 && buf[2] == punchTypePunch {
+				_, _ = c.WriteToUDP([]byte{punchMagic0, punchMagic1, punchTypePunchAck, 0, 0, 0, 0, 0, 0, 0, 0}, from)
+			}
+		}
+	}()
+	return c.LocalAddr().(*net.UDPAddr).Port
+}
+
+func guestTemplateForTest(e *connEngine, gen int) *guestPunchTemplate {
+	profile := recommendProfile(natCone, natHardSym)
+	params := tunerNextParams(profile, natCone, natHardSym, 0, profile.maxCycles, nil, nil)
+	return &guestPunchTemplate{gen: gen, profile: profile, params: params}
+}
+
+// 端口串漂移（房主 NAT 换了映射）时，旧的 extra 必须撤掉并按新串重建（CM:3356-3400）。
+func TestBirthdayDriftRebuildsExtraPunchers(t *testing.T) {
+	ip := testPeerIP(t)
+	a, _ := newAutoRelayTestApp(t)
+	e := a.engine
+
+	profile := recommendProfile(natCone, natCone)
+	gen, _ := e.beginGuestCycle()
+	e.mu.Lock()
+	e.gPuncher = newPuncher(newTestUDPConn(t), profile,
+		tunerNextParams(profile, natCone, natCone, 0, 1, nil, nil), nil)
+	e.gPunchTemplate = guestTemplateForTest(e, gen)
+	e.mu.Unlock()
+
+	arrOf := func(base, n int) []any {
+		out := make([]any, n)
+		for i := range out {
+			out[i] = float64(base + i)
+		}
+		return out
+	}
+	e.guestOnMapped(map[string]any{"hostMappedIp": ip, "hostMappedPort": 42000, "hostMappedPorts": arrOf(42000, 3)})
+	e.mu.Lock()
+	first := make([]*guestExtraPuncher, 0, len(e.gExtraPunchers))
+	for _, ep := range e.gExtraPunchers {
+		first = append(first, ep)
+	}
+	e.mu.Unlock()
+	if len(first) != 2 {
+		t.Fatalf("第一轮应登记 2 路 extra，实际 %d", len(first))
+	}
+
+	// 换一串端口 → 旧的两路必须被关并从表里换掉
+	e.guestOnMapped(map[string]any{"hostMappedIp": ip, "hostMappedPort": 43000, "hostMappedPorts": arrOf(43000, 3)})
+	e.mu.Lock()
+	second := make([]*guestExtraPuncher, 0, len(e.gExtraPunchers))
+	for _, ep := range e.gExtraPunchers {
+		second = append(second, ep)
+	}
+	e.mu.Unlock()
+	if len(second) != 2 {
+		t.Fatalf("漂移后仍应登记 2 路，实际 %d", len(second))
+	}
+	for _, ep := range first {
+		sawClosed := ep.closed.Load()
+		if !sawClosed {
+			for tries := 0; tries < 40 && !ep.closed.Load(); tries++ {
+				time.Sleep(25 * time.Millisecond)
+			}
+			sawClosed = ep.closed.Load()
+		}
+		if !sawClosed {
+			t.Errorf("漂移后旧的 %s 没有被关闭（会继续朝作废端口喷洒）", ep.key)
+		}
+		for _, np := range second {
+			if np == ep {
+				t.Errorf("旧的 %s 被当成新的一路留下了", ep.key)
+			}
+		}
+	}
+	e.guestCloseExtraPunchers("test 收尾")
+}
+
+// 房主公布多端口时，extras 必须真的能赢下隧道（赢的不是主 puncher），
+// 且赢的那一路收尾干净（登记表摘掉、socket 归属交给 rudp）。
+func TestBirthdayExtraPuncherWinsTunnel(t *testing.T) {
+	a, sink := newAutoRelayTestApp(t)
+	e := a.engine
+
+	ip := testPeerIP(t)
+	ports := []int{fakePunchPeer(t), fakePunchPeer(t), fakePunchPeer(t)}
+	arr := make([]any, len(ports))
+	for i, p := range ports {
+		arr[i] = float64(p)
+	}
+
+	// 主 puncher 存在但不起跑：它永远不可能赢，用来证明隧道是 extra 建立的
+	primarySock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(ip)})
+	if err != nil {
+		t.Fatalf("主 puncher socket 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = primarySock.Close() })
+	primary := newPuncher(primarySock, recommendProfile(natCone, natCone),
+		tunerNextParams(recommendProfile(natCone, natCone), natCone, natCone, 0, 1, nil, nil), nil)
+	primary.setTarget(&net.UDPAddr{IP: net.ParseIP(ip), Port: ports[0]})
+
+	gen, _ := e.beginGuestCycle()
+	e.mu.Lock()
+	e.gPuncher = primary
+	e.gPunchSock = primarySock
+	e.gPunchTemplate = guestTemplateForTest(e, gen)
+	e.mu.Unlock()
+
+	e.guestOnMapped(map[string]any{
+		"hostMappedIp":    ip,
+		"hostMappedPort":  ports[0],
+		"hostMappedPorts": arr,
+		"hostLocalIp":     "",
+	})
+
+	waitFor(t, 15*time.Second, func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.gP2PDone
+	}, "extra 生日 puncher 没有建立隧道")
+
+	if primary.completed.Load() {
+		t.Fatal("隧道应由 extra 建立，主 puncher 没跑却判赢了")
+	}
+	e.mu.Lock()
+	left := len(e.gExtraPunchers)
+	rudp := e.gRudp
+	e.mu.Unlock()
+	if rudp == nil {
+		t.Fatal("gP2PDone 却没有 rudp 承载")
+	}
+	if left != 0 {
+		t.Errorf("赢/败的 extra 都该从登记表摘掉，实际还剩 %d 路", left)
+	}
+	ok := false
+	for _, ev := range connEvents(sink) {
+		addr, _ := ev["address"].(string)
+		if ev["phase"] == "p2p" && ev["status"] == "success" && strings.HasPrefix(addr, "127.0.0.1:") {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatalf("成功事件必须给本机桥地址，实际 %v", connEvents(sink))
+	}
+
+	e.teardown()
+	e.mu.Lock()
+	afterTeardown := e.gExtraPunchers
+	e.mu.Unlock()
+	if afterTeardown != nil {
+		t.Errorf("teardown 后 extras 表应为 nil，实际 %v", afterTeardown)
+	}
+}
+
+// 端口数上限按同 CGNAT 加密到 12、否则 6（CM:3407），第 0 个归主 puncher。
+func TestBirthdayCapFollowsSameCgnat(t *testing.T) {
+	cases := []struct {
+		name      string
+		sameCgnat bool
+		want      int
+	}{
+		{"普通锥型 cap=6", false, 5},      // 除第 0 个（主 puncher）外 5 路
+		{"同层 CGNAT cap=12", true, 11}, // CM:3407 回环命中率低，覆盖加密
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ip := testPeerIP(t)
+			a, _ := newAutoRelayTestApp(t) // 每例一份会话：teardown 会把 sess 置 nil
+			e := a.engine
+
+			arr := make([]any, 13)
+			for i := range arr {
+				arr[i] = float64(41000 + i) // 无人监听的端口，只数登记不数赢
+			}
+			profile := recommendProfile(natCone, natCone)
+			gen, _ := e.beginGuestCycle()
+			e.mu.Lock()
+			e.gP2PDone = false
+			e.gSameCgnat = c.sameCgnat
+			e.gExtraPunchers = nil
+			e.gPuncher = newPuncher(newTestUDPConn(t), profile,
+				tunerNextParams(profile, natCone, natCone, 0, 1, nil, nil), nil)
+			e.gPunchTemplate = guestTemplateForTest(e, gen)
+			if c.sameCgnat {
+				e.gMyMappedIP = ip // 两端映射同一个公网 IP = 同层 CGNAT
+			}
+			e.mu.Unlock()
+
+			e.guestOnMapped(map[string]any{
+				"hostMappedIp":    ip,
+				"hostMappedPort":  41000,
+				"hostMappedPorts": arr,
+			})
+			e.mu.Lock()
+			got := len(e.gExtraPunchers)
+			e.mu.Unlock()
+			if got != c.want {
+				t.Errorf("sameCgnat=%v 期望 %d 路 extra，实际 %d", c.sameCgnat, c.want, got)
+			}
+			e.guestCloseExtraPunchers("test 收尾")
+		})
+	}
+}
+
+// 退房必须把在途的生日 puncher 一起收掉：每一路都自带 socket，
+// 不登记不关闭就会在退房后继续朝作废端口喷洒（模组的 stopAllConnectionWork 全数 cancel+close）。
+func TestTeardownClosesInFlightExtraPunchers(t *testing.T) {
+	ip := testPeerIP(t)
+	a, _ := newAutoRelayTestApp(t)
+	e := a.engine
+
+	profile := recommendProfile(natCone, natCone)
+	gen, _ := e.beginGuestCycle()
+	e.mu.Lock()
+	e.gPuncher = newPuncher(newTestUDPConn(t), profile,
+		tunerNextParams(profile, natCone, natCone, 0, 1, nil, nil), nil)
+	e.gPunchTemplate = guestTemplateForTest(e, gen)
+	e.mu.Unlock()
+
+	arr := make([]any, 4)
+	for i := range arr {
+		arr[i] = float64(44000 + i) // 没人监听：这几路会一直打在途，正好用来验收尾
+	}
+	e.guestOnMapped(map[string]any{"hostMappedIp": ip, "hostMappedPort": 44000, "hostMappedPorts": arr})
+
+	e.mu.Lock()
+	live := make([]*guestExtraPuncher, 0, len(e.gExtraPunchers))
+	for _, ep := range e.gExtraPunchers {
+		live = append(live, ep)
+	}
+	e.mu.Unlock()
+	if len(live) != 3 {
+		t.Fatalf("应登记 3 路在途 extra，实际 %d", len(live))
+	}
+
+	e.teardown()
+
+	for _, ep := range live {
+		if !ep.closed.Load() {
+			t.Errorf("%s（端口 %d）在退房后仍在喷洒", ep.key, ep.port)
+		}
+	}
+}
