@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -95,6 +96,7 @@ type hostPeer struct {
 	mapped          *stunMappedAddr // joiner 映射地址（punch_info 上报）
 	hostMapped      *stunMappedAddr // 我方打洞 socket 映射（offer 时缓存）
 	hostDelta       int
+	sameCgnat       bool // 两端映射同一公网 IP（CM:3659-3665）
 }
 
 type connEngine struct {
@@ -632,6 +634,31 @@ func udpAddrOf(m *stunMappedAddr) *net.UDPAddr {
 	return &net.UDPAddr{IP: ip, Port: m.Port}
 }
 
+// filterAddressFamilyCandidate 地址族过滤（逐句对齐 CM:15549-15585）：
+// 对端通告的候选是本端够不着的地址族/环回地址时丢弃，返回 ""。
+//
+// 为什么必须有：模组的实测写在注释里——"本端无全局IPv6时丢弃host发布的IPv6候选，
+// 避免朝不可达地址空转47轮(QWA6D3/S822QF)"。app 的打洞 socket 只绑 IPv4
+// （punch.go:848），而对端可能是 28 模板里跑在双栈上的模组房，它会把 IPv6 映射地址通告过来；
+// 没有这层过滤就是一边朝根本发不出去的目标刷轮次，还把中继兜底一路往后推。
+func (e *connEngine) filterAddressFamilyCandidate(ip string, port int, tag string) string {
+	if ip == "" {
+		return ip
+	}
+	if strings.Contains(ip, ":") {
+		if !fbVerifyIPv6Connectivity() {
+			e.app.netLog("warn", fmt.Sprintf("[AddrFilter] 忽略不可达 IPv6 候选 %s:%d (%s)：本端无全局IPv6", ip, port, tag))
+			return ""
+		}
+		return ip
+	}
+	if strings.HasPrefix(ip, "127.") || strings.HasPrefix(ip, "0.") || ip == "localhost" {
+		e.app.netLog("warn", fmt.Sprintf("[AddrFilter] 忽略不可达候选 %s:%d (%s)：环回地址", ip, port, tag))
+		return ""
+	}
+	return ip
+}
+
 // getLocalIP 取本机局域网 IP（UDP connect 探测默认路由出口，不实际发包）。
 func getLocalIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
@@ -728,7 +755,11 @@ func (e *connEngine) guestOnOffer(from string, data map[string]any) {
 		e.hostPort = port
 	}
 	if ip := sigStr(data, "hostMappedIp"); ip != "" && sigInt(data, "hostMappedPort") > 0 {
-		e.gMapped = &stunMappedAddr{IP: ip, Port: sigInt(data, "hostMappedPort")}
+		// CM:2604 同款地址族过滤：本端没有全局 IPv6 时不采信对端通告的 IPv6 映射，
+		// 否则就是朝发不出去的目标空转几十轮（模组工单 QWA6D3/S822QF 的成因）。
+		if e.filterAddressFamilyCandidate(ip, sigInt(data, "hostMappedPort"), "holepunch_offer:hostMappedIp") != "" {
+			e.gMapped = &stunMappedAddr{IP: ip, Port: sigInt(data, "hostMappedPort")}
+		}
 	}
 	if d := sigInt(data, "hostMappedPortDelta"); d != 0 {
 		e.gMappedDelta = d
@@ -1234,6 +1265,9 @@ func (e *connEngine) guestOnMapped(data map[string]any) {
 	ip := sigStr(data, "hostMappedIp")
 	port := sigInt(data, "hostMappedPort")
 	if ip == "" || port <= 0 {
+		return
+	}
+	if e.filterAddressFamilyCandidate(ip, port, "holepunch_mapped:hostMappedIp") == "" {
 		return
 	}
 	m := &stunMappedAddr{IP: ip, Port: port}
@@ -1758,13 +1792,28 @@ func toAnySlice(ss []string) []any {
 func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 	ip := sigStr(data, "joinerMappedIp")
 	port := sigInt(data, "joinerMappedPort")
+	// CM:3635：候选地址族本端够不着就整条 punch_info 丢掉，不进入打洞。
+	if ip != "" && e.filterAddressFamilyCandidate(ip, port, "punch_info:joinerMapped") == "" {
+		e.app.netLog("warn", "[HostPunchInfo] Drop punch_info from "+from+": candidate address family unreachable locally")
+		return
+	}
+	requestHostLocalIp := sigBool(data, "requestHostLocalIp")
+	var cgnatHit bool
 	e.mu.Lock()
 	peer := e.hPeers[from]
 	var hm *stunMappedAddr
 	var hd int
+	var sc bool
 	if peer != nil {
 		if ip != "" && port > 0 {
 			peer.mapped = &stunMappedAddr{IP: ip, Port: port}
+		}
+		// CM:3659-3665：两端映射到同一个公网 IP = 同一层 CGNAT 后面。
+		// 朝这个公网映射打洞是白打（包出去就被自家 NAT 弹回来），模组在这里留 warn，
+		// 并让后续"要不要发局域网地址/提前备中继"都按这个事实走。
+		if ip != "" && peer.hostMapped != nil && peer.hostMapped.IP == ip {
+			peer.sameCgnat = true
+			cgnatHit = true
 		}
 		// joiner 对称标志 + delta/range（反向打洞预测用；easySym 为对端权威判定）
 		if sigBool(data, "joinerSymmetric") {
@@ -1780,10 +1829,14 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 		}
 		// 我方映射是本 goroutine 之外写入的，必须在这把锁里取快照
 		hm, hd = peer.hostMapped, peer.hostDelta
+		sc = peer.sameCgnat
 	}
 	e.mu.Unlock()
 	if peer == nil {
 		return
+	}
+	if cgnatHit {
+		e.app.netLog("warn", fmt.Sprintf("[HostPunchInfo] Same public IP (%s): both behind same CGNAT", ip))
 	}
 
 	// 回 holepunch_mapped（对齐模组字段：hostMappedIp/hostMappedPort/hostMappedPorts）
@@ -1796,8 +1849,12 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 			mappedData["hostMappedPortDelta"] = hd
 		}
 	}
-	if lip := getLocalIP(); lip != "" {
-		mappedData["hostLocalIp"] = lip
+	// CM:4421：局域网地址只在"房客索要"或"两端同 CGNAT"时才发——同一层 NAT 时公网映射
+	// 必然打不通，能走通的只有内网直连，这时把 hostLocalIp 交出去才有意义。
+	if requestHostLocalIp || sc {
+		if lip := getLocalIP(); lip != "" {
+			mappedData["hostLocalIp"] = lip
+		}
 	}
 	if err := e.sendSignal("holepunch_mapped", mappedData, from); err != nil {
 		e.app.netLog("warn", "发送 holepunch_mapped 失败: "+err.Error())
