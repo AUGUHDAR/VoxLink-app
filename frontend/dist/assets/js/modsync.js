@@ -432,15 +432,30 @@
       if (!scope) return { action: "proceed" };
       return new Promise(function (resolve, reject) {
         joinFlow = { code: code, resolve: resolve, reject: reject };
+        // 玩家在这个弹窗里先做了选择（直接进入 / 返回）之后，后端那份清单结果
+        // 到达时不能再把窗弹回来 —— 这正是"点了直接进入窗还在、再点就重复加入"的成因。
+        var settled = false;
         openModal(t(scope === "all" ? "voxlink.modsync.title_all" : "voxlink.modsync.title"),
           t(scope === "all" ? "voxlink.modsync.subtitle_all" : "voxlink.modsync.subtitle", code),
           '<div class="modsync-note">' + VL.esc(
             t(scope === "all" ? "voxlink.modsync.checking_all" : "voxlink.modsync.checking")) + "</div>",
-          '<button class="btn btn-ghost" id="ms-skip2">' + VL.esc(t("voxlink.modsync.skip_check")) + "</button>");
+          '<button class="btn btn-ghost" id="ms-skip2">' + VL.esc(t("voxlink.modsync.skip_check")) + "</button>" +
+          '<button class="btn btn-ghost" id="ms-cancel2">' + VL.esc(t("voxlink.modsync.back")) + "</button>");
         VL.$("#ms-skip2").addEventListener("click", function () {
+          if (settled) return;
+          settled = true;
           VL.api("ModSyncBypass", code).catch(function () { });
+          // finishJoin 负责关窗并放行加入；原来这里只发了一个 Bypass，
+          // 窗不关、加入流程还挂着，玩家只能反复点。
+          finishJoin(false);
+        });
+        VL.$("#ms-cancel2").addEventListener("click", function () {
+          if (settled) return;
+          settled = true;
+          cancelJoin();
         });
         VL.api("ModSyncGate", JSON.stringify({ code: code, scope: scope })).then(function (res) {
+          if (settled) return;
           res = res || {};
           if (res.pendingNote) pendingNote = { level: res.noteLevel, key: res.pendingNote.key || "" };
           if (res.action !== "choose") { resolve(res); return; }
