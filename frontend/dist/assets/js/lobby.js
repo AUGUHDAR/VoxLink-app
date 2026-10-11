@@ -13,7 +13,8 @@
     search: "",
     total: 0,
     categories: {},   // key -> 中文名
-    loading: false
+    loading: false,
+    excludeHL: false  // 「排除 Happy Link」开关，只过滤当前这一页，不写盘也不改服务端查询
   };
 
   var els = {};
@@ -28,6 +29,7 @@
     els.search = VL.$("#lobby-search");
     els.category = VL.$("#lobby-category");
     els.loaders = VL.$("#lobby-loaders");
+    els.excludeHL = VL.$("#lobby-exclude-hl");
     els.refresh = VL.$("#lobby-refresh");
     els.ip = VL.$("#lobby-ip");
   }
@@ -127,6 +129,15 @@
     );
   }
 
+  // 「排除 Happy Link」：纯前端过滤当前这一页，与网页端同名开关同一口径
+  // （web/index.html 的 excludeHL 也不写 localStorage、不改服务端查询）。
+  // 因此开着它时同一页可能少几张卡，分页总数仍按服务端返回算——网页端同样如此。
+  function visibleRooms() {
+    var rooms = state.rooms || [];
+    if (!state.excludeHL) return rooms;
+    return rooms.filter(function (r) { return r.source !== "happylink"; });
+  }
+
   function render() {
     if (state.loading) {
       els.grid.innerHTML = skeleton(8);
@@ -134,7 +145,7 @@
       els.pager.classList.add("hidden");
       return;
     }
-    var rooms = state.rooms || [];
+    var rooms = visibleRooms();
     if (!rooms.length) {
       els.grid.innerHTML = "";
       els.empty.classList.remove("hidden");
@@ -293,6 +304,14 @@
       state.page = 1;
       fetchRooms();
     });
+
+    if (els.excludeHL) {
+      els.excludeHL.addEventListener("click", function () {
+        state.excludeHL = !state.excludeHL;
+        els.excludeHL.classList.toggle("active", state.excludeHL);
+        render();
+      });
+    }
 
     els.prev.addEventListener("click", function () { if (state.page > 1) goPage(state.page - 1); });
     els.next.addEventListener("click", function () { goPage(state.page + 1); });
