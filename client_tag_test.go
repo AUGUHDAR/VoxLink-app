@@ -109,6 +109,36 @@ func TestSaveSettingsRejectsOverlongClientTag(t *testing.T) {
 	}
 }
 
+// theme 与 clientTag/language 同口径：开发者入口写回野值要当场报错，
+// 不能把 "彩虹色" 这类值落盘（界面拿到野值只能走兜底分支）。
+func TestSaveSettingsRejectsUnknownTheme(t *testing.T) {
+	dir := t.TempDir()
+	a := NewApp()
+	a.settingsPath = dir + "/settings.json"
+	a.settings.Theme = "light"
+
+	out := a.SaveSettings(`{"theme":"彩虹色"}`)
+	if !strings.Contains(out, "INVALID_PARAMS") {
+		t.Fatalf("未知 theme 应报错：%s", out)
+	}
+	if a.settings.Theme != "light" {
+		t.Errorf("报错那次不该改到 theme：%q", a.settings.Theme)
+	}
+	for _, ok := range []string{"light", "dark"} {
+		if strings.Contains(a.SaveSettings(`{"theme":"`+ok+`"}`), "INVALID_PARAMS") {
+			t.Errorf("%s 是合法主题却被拒", ok)
+		}
+	}
+	// 未提供 theme（空串）= 不动现有值，也不能报错
+	a.settings.Theme = "dark"
+	if strings.Contains(a.SaveSettings(`{"clientTag":"pcl2"}`), "INVALID_PARAMS") {
+		t.Error("不带 theme 的保存被误拒")
+	}
+	if a.settings.Theme != "dark" {
+		t.Errorf("不带 theme 的保存改掉了主题：%q", a.settings.Theme)
+	}
+}
+
 // --client-tag 必须真的落到 /room/create 的请求体里：这里用 httptest 假基址
 // （绝不打生产服务器），并让建房响应直接失败——只验"发出去的那一段"，不进会话流程。
 func TestCreateRoomPutsClientTagOnTheWire(t *testing.T) {

@@ -173,7 +173,7 @@ var cliCommands = []cliCommand{
 	{Path: "relay list", Summary: "中继节点列表",
 		Run: func(a *App, _ context.Context, _ string) (string, error) { return a.RelayList(), nil }},
 
-	{Path: "net stun", Summary: "本机公网地址与 NAT 类型",
+	{Path: "net stun", Summary: "服务端看到的本机公网地址",
 		Run: func(a *App, _ context.Context, _ string) (string, error) { return a.GetStun(), nil }},
 	{Path: "net ports", Summary: "本机在监听的游戏端口",
 		Run: func(a *App, _ context.Context, _ string) (string, error) { return a.DetectMcPorts(), nil }},

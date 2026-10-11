@@ -515,6 +515,11 @@ func (a *App) SaveSettings(settingsJSON string) string {
 		}
 		cleanTag = &clean
 	}
+	if req.Theme != "" && req.Theme != "light" && req.Theme != "dark" {
+		// 与 clientTag/language 同一口径：开发者入口当场报错，不写进磁盘。
+		// 界面只会发这两个值，落盘的野值会让主题解析走兜底分支。
+		return wrapErr("INVALID_PARAMS", "theme 只接受 light|dark，收到 "+req.Theme)
+	}
 
 	a.mu.Lock()
 	if req.Theme != "" {
