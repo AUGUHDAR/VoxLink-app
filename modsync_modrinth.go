@@ -125,13 +125,13 @@ func modrinthVersionsFromSha1(sha1List []string) map[string]map[string]any {
 		}
 		payload, err := json.Marshal(body)
 		if err != nil {
-			modSyncLogWarn("version_files chunk failed (%d hashes): %s", len(chunk), err.Error())
+			modSyncLogWarn("version_files chunk failed ({} hashes): {}", len(chunk), err.Error()) // ModrinthClient.java:98
 			continue
 		}
 		resp, err := modrinthPostJSON(modrinthAPIURLs("/version_files"), string(payload))
 		if err != nil {
 			// :96-99：分块网络失败只损失该块
-			modSyncLogWarn("version_files chunk failed (%d hashes): %s", len(chunk), err.Error())
+			modSyncLogWarn("version_files chunk failed ({} hashes): {}", len(chunk), err.Error()) // ModrinthClient.java:98
 			continue
 		}
 		if resp == nil {
@@ -164,13 +164,13 @@ func modrinthProjectsByIds(ids []string) map[string]map[string]any {
 		// Gson 在 Java 侧负责转义；这里交给 encoding/json，产出同样的 ["id","id"] 形态。
 		idsJSON, err := json.Marshal(chunk)
 		if err != nil {
-			modSyncLogWarn("projects chunk encode failed (%d ids): %s", len(chunk), err.Error())
+			modSyncLogWarn("projects chunk encode failed ({} ids): {}", len(chunk), err.Error())
 			continue
 		}
 
 		arr, err := modrinthGetJSONArray(modrinthAPIURLs("/projects?ids=" + url.QueryEscape(string(idsJSON))))
 		if err != nil {
-			modSyncLogWarn("projects chunk failed (%d ids): %s", len(chunk), err.Error())
+			modSyncLogWarn("projects chunk failed ({} ids): {}", len(chunk), err.Error()) // ModrinthClient.java:139
 			continue
 		}
 		if arr == nil {
@@ -712,7 +712,7 @@ func modrinthDoDownload(cli *http.Client, rawURL, expectedSha512, expectedSha1, 
 			return 0, fmt.Errorf("sha1 mismatch: %s", fileName)
 		}
 	default:
-		modSyncLogWarn("no expected hash for %s; skipping verification", fileName)
+		modSyncLogWarn("no expected hash for {}; skipping verification", fileName) // ModrinthClient.java:416
 	}
 
 	// 原子改名（:419-429）：Go 的 os.Rename 在 POSIX 上是原子替换；Windows 上

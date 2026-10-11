@@ -209,12 +209,12 @@ func (a *App) modSyncFetchWithRetry(roomCode, scope string) modSyncFetchResult {
 					strings.Contains(code, "UNKNOWN_ENDPOINT") ||
 					strings.Contains(code, "INVALID_ENDPOINT")
 				if authoritative {
-					modSyncLogWarn("getRoomMods failed (authoritative): %s %s", code, msg)
+					modSyncLogWarn("getRoomMods failed (authoritative): {} {}", code, msg) // ModSyncGuestService.java:307
 					return modSyncFetchResult{outcome: modSyncFetchNotReady}
 				}
 				// 服务器明确回了一个业务错误码：瞬态，sleep 1500ms 后重试（:311-317）
 				sawTransient = true
-				modSyncLogWarn("getRoomMods transient (%d/%d): %s", attempt+1, maxAttempts, code)
+				modSyncLogWarn("getRoomMods transient ({}/{}): {}", attempt+1, maxAttempts, code) // ModSyncGuestService.java:312
 				if !modSyncCancellableSleep(roomCode, modSyncTransientSleep) {
 					return modSyncFetchResult{outcome: modSyncFetchBypassed}
 				}
@@ -222,9 +222,9 @@ func (a *App) modSyncFetchWithRetry(roomCode, scope string) modSyncFetchResult {
 			}
 			sawTransient = true
 			if code == "" || code == "NETWORK" {
-				modSyncLogWarn("manifest fetch error: %s", err.Error())
+				modSyncLogWarn("manifest fetch error: {}", err.Error()) // ModSyncGuestService.java:357
 			} else {
-				modSyncLogWarn("getRoomMods timeout (%d/%d)", attempt+1, maxAttempts)
+				modSyncLogWarn("getRoomMods timeout ({}/{})", attempt+1, maxAttempts) // ModSyncGuestService.java:351
 			}
 			continue
 		}
@@ -232,7 +232,7 @@ func (a *App) modSyncFetchWithRetry(roomCode, scope string) modSyncFetchResult {
 		// 信封 success 但无数据 —— Java 的 `resp.data == null` 路径：按瞬态处理。
 		if len(data) == 0 {
 			sawTransient = true
-			modSyncLogWarn("getRoomMods transient (%d/%d): %s", attempt+1, maxAttempts, "EMPTY_RESPONSE")
+			modSyncLogWarn("getRoomMods transient ({}/{}): {}", attempt+1, maxAttempts, "EMPTY_RESPONSE") // ModSyncGuestService.java:312
 			if !modSyncCancellableSleep(roomCode, modSyncTransientSleep) {
 				return modSyncFetchResult{outcome: modSyncFetchBypassed}
 			}
@@ -550,7 +550,7 @@ func (a *App) ModSyncGate(reqJSON string) string {
 
 	env := s.env()
 	if !env.configured() {
-		modSyncLogWarn("gate skip: %s (no MC instance / mods dir configured)", modSyncFetchNotConfigured)
+		modSyncLogWarn("gate skip: {} (no MC instance / mods dir configured)", modSyncFetchNotConfigured)
 		return wrapOK(modSyncGateResponse{Action: "proceed", Outcome: modSyncFetchNotConfigured, Code: req.Code})
 	}
 
@@ -559,7 +559,7 @@ func (a *App) ModSyncGate(reqJSON string) string {
 
 	// 重置在途提示；gate 入口留痕供真机定谳（:133-135）
 	modSyncSetPendingNote(-1, "")
-	modSyncLogInfo("gate: room=%s scope=%s", req.Code, scope)
+	modSyncLogInfo("gate: room={} scope={}", req.Code, scope) // ModSyncGuestService.java:135
 
 	res := a.modSyncFetchWithRetry(req.Code, scope)
 	if modSyncGate.isBypassed(req.Code) {
@@ -569,7 +569,7 @@ func (a *App) ModSyncGate(reqJSON string) string {
 	}
 
 	if res.outcome != modSyncFetchManifest {
-		modSyncLogInfo("gate skip: %s", res.outcome)
+		modSyncLogInfo("gate skip: {}", res.outcome) // ModSyncGuestService.java:145
 		resp := modSyncGateResponse{Action: "proceed", Outcome: res.outcome, Code: req.Code, Scope: scope}
 		switch res.outcome {
 		case modSyncFetchUnsupported:
@@ -590,14 +590,14 @@ func (a *App) ModSyncGate(reqJSON string) string {
 	diff, err := func() (*modSyncDiffResult, error) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				modSyncLogWarn("guest diff panic recovered: %v", rec)
+				modSyncLogWarn("guest diff panic recovered: {}", rec)
 			}
 		}()
 		return modSyncComputeDiff(res.manifest, env), nil
 	}()
 	if err != nil || diff == nil {
 		// :214-231：diff 失败 → 强提示后放行（静默放行有风险，玩家要能看见）
-		modSyncLogWarn("guest diff failed, proceed without gate: %v", err)
+		modSyncLogWarn("guest diff failed, proceed without gate: {}", err) // ModSyncGuestService.java:215
 		modSyncSetPendingNote(2, langModSyncGateFailedWarn)
 		return wrapOK(modSyncGateResponse{
 			Action:      "proceed",
@@ -612,20 +612,20 @@ func (a *App) ModSyncGate(reqJSON string) string {
 	// MC 版本 / 加载器检测（:162-179）：不一致时清单仅供参考，置顶进 unresolvable
 	hostMc := jstr(res.manifest, "mcVersion")
 	if hostMc != "" && hostMc != env.GameVersion {
-		modSyncLogWarn("MC version mismatch: host=%s guest=%s", hostMc, env.GameVersion)
+		modSyncLogWarn("MC version mismatch: host={} guest={}", hostMc, env.GameVersion) // ModSyncGuestService.java:166
 		diff.Unresolvable = append([]modSyncLangLine{
 			newModSyncLangLine(langModSyncMcMismatch, hostMc, env.GameVersion),
 		}, diff.Unresolvable...)
 	}
 	hostLoader := jstr(res.manifest, "loader")
 	if hostLoader != "" && !strings.EqualFold(hostLoader, env.Loader) {
-		modSyncLogWarn("Loader mismatch: host=%s guest=%s", hostLoader, env.Loader)
+		modSyncLogWarn("Loader mismatch: host={} guest={}", hostLoader, env.Loader) // ModSyncGuestService.java:175
 		diff.Unresolvable = append([]modSyncLangLine{
 			newModSyncLangLine(langModSyncLoaderMismatch, hostLoader, env.Loader),
 		}, diff.Unresolvable...)
 	}
 
-	modSyncLogInfo("guest diff: downloadable=%d versionDiff=%d manual=%d unresolvable=%d titles=%s",
+	modSyncLogInfo("guest diff: downloadable={} versionDiff={} manual={} unresolvable={} titles={}", // ModSyncGuestService.java:181
 		len(diff.Downloadable), len(diff.VersionDiff), len(diff.ManualEntries), len(diff.Unresolvable),
 		modSyncClipRune(modSyncJoinTitles(diff), 200))
 
@@ -751,7 +751,7 @@ func (a *App) modSyncStartResolve(env modSyncEnv, notfound, incompatible, knownD
 			a.emit("modsync:resolved", payload)
 		},
 		onFinished: func(resolvedCount int) {
-			modSyncLogInfo("resolve finished, %d became downloadable", resolvedCount)
+			modSyncLogInfo("resolve finished, {} became downloadable", resolvedCount) // ModSyncSelectScreen.java:557
 			a.emit("modsync:resolve", map[string]any{"resolving": false, "resolved": resolvedCount})
 		},
 	}
@@ -788,7 +788,7 @@ func (a *App) ModSyncBypass(roomCode string) string {
 		modSyncGate.mu.Lock()
 		modSyncGate.bypassed[code] = true
 		modSyncGate.mu.Unlock()
-		modSyncLogInfo("gate: player bypassed, room=%s", code)
+		modSyncLogInfo("gate: player bypassed, room={}", code) // ModSyncGuestService.java:81
 	}
 	return wrapOK(map[string]any{"bypassed": true})
 }
@@ -919,7 +919,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 
 		// H6：fileName 消毒 —— 防恶意/错乱清单把文件写到 mods 目录之外（:333-341）
 		if !modSyncSafeFileName(e.FileName, modsDir) {
-			modSyncLogWarn("skip unsafe fileName entry: %s (title=%s)", e.FileName, e.Title)
+			modSyncLogWarn("skip unsafe fileName entry: {} (title={})", e.FileName, e.Title) // ModSyncSelectScreen.java:336
 			lastError = e.Title
 			continue
 		}
@@ -932,7 +932,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 		if err != nil {
 			if _, aborted := err.(*modrinthAbortedError); aborted {
 				// 玩家取消：静默收场，不算失败（:364-368）
-				modSyncLogInfo("download %s cancelled by user", e.FileName)
+				modSyncLogInfo("download {} cancelled by user", e.FileName) // ModSyncSelectScreen.java:366
 				a.modSyncEmitProgress(entries, i, doneFiles, bytesDone, totalBytes, current, 0)
 				a.emit("modsync:download", map[string]any{
 					"outcome":    "cancelled",
@@ -941,7 +941,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 				})
 				return
 			}
-			modSyncLogWarn("download %s failed: %s", e.FileName, err.Error())
+			modSyncLogWarn("download {} failed: {}", e.FileName, err.Error()) // ModSyncSelectScreen.java:370
 			lastError = e.Title
 			continue
 		}

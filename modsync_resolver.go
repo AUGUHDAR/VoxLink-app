@@ -106,7 +106,7 @@ func (p *modSyncPool) worker() {
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
-					modSyncLogWarn("resolve task error: %v", rec) // :152-153
+					modSyncLogWarn("resolve task error: {}", rec) // :152-153
 				}
 			}()
 			task()
@@ -266,9 +266,9 @@ func modSyncRunOne(e *modSyncEntry, failed *modSyncFailedList, ctx *modSyncResol
 			// 网络失败 ≠ 未找到：进 failed，不写 NEGATIVE（:170-179）
 			failed.add(e)
 			n := ctx.netFailures.Add(1)
-			modSyncLogWarn("resolve %s failed: %s", key, err.Error())
+			modSyncLogWarn("resolve {} failed: {}", key, err.Error()) // ModSyncResolver.java:173
 			if int(n) >= modSyncMaxNetFailures {
-				modSyncLogWarn("resolve giving up after %d network failures", n)
+				modSyncLogWarn("resolve giving up after {} network failures", n) // ModSyncResolver.java:175
 			}
 			return
 		}
@@ -276,7 +276,7 @@ func modSyncRunOne(e *modSyncEntry, failed *modSyncFailedList, ctx *modSyncResol
 	}
 
 	if hit == nil {
-		modSyncLogInfo("modsync resolve: NOT-FOUND %s (%s)",
+		modSyncLogInfo("modsync resolve: NOT-FOUND {} ({})", // ModSyncResolver.java:183
 			modSyncResolveClip(e.Title), modSyncResolveClip(e.FileName))
 		return
 	}
@@ -307,7 +307,7 @@ func modSyncRunOne(e *modSyncEntry, failed *modSyncFailedList, ctx *modSyncResol
 	if title == "" {
 		title = e.Title
 	}
-	modSyncLogInfo("modsync resolve: %s %s (%s)", outcome, modSyncResolveClip(title), modSyncResolveClip(e.FileName))
+	modSyncLogInfo("modsync resolve: {} {} ({})", outcome, modSyncResolveClip(title), modSyncResolveClip(e.FileName)) // ModSyncResolver.java:197
 	if cb.onResolved != nil {
 		cb.onResolved(e, hit, bucket)
 	}
@@ -323,12 +323,12 @@ func modSyncDecRemaining(remaining *atomic.Int64, failed *modSyncFailedList, pas
 		return
 	}
 	if !failed.empty() && pass == 0 && ctx.netFailures.Load() < int64(modSyncMaxNetFailures) {
-		modSyncLogInfo("resolve retry pass for %d failed entries", len(failed.snapshot()))
+		modSyncLogInfo("resolve retry pass for {} failed entries", len(failed.snapshot())) // ModSyncResolver.java:214
 		modSyncResolveBatch(failed.snapshot(), 1, ctx, cb)
 		return
 	}
 	if !failed.empty() {
-		modSyncLogWarn("resolve: %d entries unresolved (network), retry next join", len(failed.snapshot()))
+		modSyncLogWarn("resolve: {} entries unresolved (network), retry next join", len(failed.snapshot())) // ModSyncResolver.java:218
 	}
 	if cb.onFinished != nil {
 		cb.onFinished(int(ctx.totalResolved.Load()))
@@ -354,7 +354,7 @@ func modSyncProcessDeps(hit *modSyncEntry, ctx *modSyncResolveCtx, depth int, cb
 		}
 		dep, err := modSyncResolveMrDep(pid, ctx.env)
 		if err != nil {
-			modSyncLogWarn("dep %s failed: %s", pid, err.Error())
+			modSyncLogWarn("dep {} failed: {}", pid, err.Error()) // ModSyncResolver.java:258
 			continue
 		}
 		if dep == nil || dep.DownloadURL == "" {
@@ -366,7 +366,7 @@ func modSyncProcessDeps(hit *modSyncEntry, ctx *modSyncResolveCtx, depth int, cb
 		modSyncMarkSeen(ctx, dep)
 		ctx.added.Add(1)
 		ctx.totalResolved.Add(1)
-		modSyncLogInfo("modsync resolve: dep-added-mr %s (%s)", modSyncResolveClip(dep.Title), modSyncResolveClip(dep.FileName))
+		modSyncLogInfo("modsync resolve: dep-added-mr {} ({})", modSyncResolveClip(dep.Title), modSyncResolveClip(dep.FileName)) // ModSyncResolver.java:254
 		if cb.onResolved != nil {
 			cb.onResolved(nil, dep, modSyncBucketDownloadable)
 		}
@@ -388,7 +388,7 @@ func modSyncProcessDeps(hit *modSyncEntry, ctx *modSyncResolveCtx, depth int, cb
 		}
 		dep, err := modSyncResolveCfDep(modID, fileID, ctx.env)
 		if err != nil {
-			modSyncLogWarn("cf dep %s failed: %s", id, err.Error())
+			modSyncLogWarn("cf dep {} failed: {}", id, err.Error()) // ModSyncResolver.java:298
 			continue
 		}
 		if dep == nil || dep.DownloadURL == "" {
@@ -400,7 +400,7 @@ func modSyncProcessDeps(hit *modSyncEntry, ctx *modSyncResolveCtx, depth int, cb
 		modSyncMarkSeen(ctx, dep)
 		ctx.added.Add(1)
 		ctx.totalResolved.Add(1)
-		modSyncLogInfo("modsync resolve: dep-added-cf %s (%s)", modSyncResolveClip(dep.Title), modSyncResolveClip(dep.FileName))
+		modSyncLogInfo("modsync resolve: dep-added-cf {} ({})", modSyncResolveClip(dep.Title), modSyncResolveClip(dep.FileName)) // ModSyncResolver.java:294
 		if cb.onResolved != nil {
 			cb.onResolved(nil, dep, modSyncBucketDownloadable)
 		}

@@ -97,7 +97,7 @@ func (a *App) modSyncOnRoomCreated() {
 	s := a.modSync()
 	s.hostExec(func() {
 		if _, err := s.ensureCache(); err != nil {
-			modSyncLogWarn("local manifest cache build failed: %s", err.Error())
+			modSyncLogWarn("local manifest cache build failed: {}", err.Error()) // ModSyncManifestService.java:56
 			return
 		}
 		s.proactivePushBothScopes()
@@ -122,27 +122,27 @@ func (a *App) modSyncOnModsRequest(data map[string]any) {
 	code, token, ok := a.modSyncRoom()
 	if !ok {
 		// :81-85：不在当房主状态 → 留痕丢弃
-		modSyncLogWarn("mods_request %s ignored (not hosting)", requestID)
+		modSyncLogWarn("mods_request {} ignored (not hosting)", requestID) // ModSyncManifestService.java:83
 		return
 	}
 
 	s.hostExec(func() {
 		root, err := s.ensureCache()
 		if err != nil {
-			modSyncLogWarn("answer mods_request %s failed: %s", requestID, err.Error())
+			modSyncLogWarn("answer mods_request {} failed: {}", requestID, err.Error()) // ModSyncManifestService.java:97
 			return
 		}
 		manifest := root.scopeManifest(scope)
 		if manifest == nil {
-			modSyncLogWarn("answer mods_request %s failed: manifest missing for scope %s", requestID, scope)
+			modSyncLogWarn("answer mods_request {} failed: manifest missing for scope {}", requestID, scope)
 			return
 		}
 		err = a.modSyncAnswer(code, token, requestID, scope, manifest)
 		if err != nil {
-			modSyncLogWarn("answer mods_request %s failed: %s", requestID, err.Error())
+			modSyncLogWarn("answer mods_request {} failed: {}", requestID, err.Error()) // ModSyncManifestService.java:97
 			return
 		}
-		modSyncLogInfo("mods_request %s (%s) answered, success=%v", requestID, scope, true)
+		modSyncLogInfo("mods_request {} ({}) answered, success={}", requestID, scope, true) // ModSyncManifestService.java:95
 	})
 }
 
@@ -189,7 +189,7 @@ func (s *modSyncState) ensureCache() (*modSyncCacheRoot, error) {
 	if disk := modSyncReadDiskCache(env.CacheFile, stateHash); disk != nil {
 		s.cachedStateHash = stateHash
 		s.cachedRoot = disk
-		modSyncLogInfo("manifest cache hit (state %s)", stateHash)
+		modSyncLogInfo("manifest cache hit (state {})", stateHash) // ModSyncManifestService.java:120
 		return disk, nil
 	}
 
@@ -204,7 +204,7 @@ func (s *modSyncState) ensureCache() (*modSyncCacheRoot, error) {
 		jarCount = *built.JarCount
 	}
 	if jarCount > 0 && modSyncModsLen(built.Required) == 0 && modSyncModsLen(built.All) == 0 {
-		modSyncLogWarn("MR zero-hit for %d jars, skip caching (modrinth unreachable?), rebuild on next request", jarCount)
+		modSyncLogWarn("MR zero-hit for {} jars, skip caching (modrinth unreachable?), rebuild on next request", jarCount) // ModSyncManifestService.java:133
 		return built, nil
 	}
 
@@ -279,23 +279,23 @@ func modSyncWriteDiskCache(cacheFile string, root *modSyncCacheRoot, stateHash s
 	root.BuiltAt = time.Now().Unix() // System.currentTimeMillis()/1000（:194）
 	if dir := filepath.Dir(cacheFile); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			modSyncLogWarn("manifest cache write failed: %s", err.Error())
+			modSyncLogWarn("manifest cache write failed: {}", err.Error()) // ModSyncManifestService.java:203
 			return
 		}
 	}
 	data, err := json.Marshal(root)
 	if err != nil {
-		modSyncLogWarn("manifest cache write failed: %s", err.Error())
+		modSyncLogWarn("manifest cache write failed: {}", err.Error()) // ModSyncManifestService.java:203
 		return
 	}
 	tmp := cacheFile + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		modSyncLogWarn("manifest cache write failed: %s", err.Error())
+		modSyncLogWarn("manifest cache write failed: {}", err.Error()) // ModSyncManifestService.java:203
 		return
 	}
 	if err := os.Rename(tmp, cacheFile); err != nil {
 		_ = os.Remove(tmp)
-		modSyncLogWarn("manifest cache write failed: %s", err.Error())
+		modSyncLogWarn("manifest cache write failed: {}", err.Error()) // ModSyncManifestService.java:203
 	}
 }
 
@@ -312,7 +312,7 @@ func (s *modSyncState) buildBothManifests(env modSyncEnv, stateHash string) (*mo
 
 	jars := modSyncListJars(env.ModsDir)
 	if len(jars) == 0 {
-		modSyncLogInfo("no local mods, manifests built in %dms", time.Now().UnixMilli()-start)
+		modSyncLogInfo("no local mods, manifests built in {}ms", time.Now().UnixMilli()-start) // ModSyncManifestService.java:225
 		return out, nil
 	}
 
@@ -328,7 +328,7 @@ func (s *modSyncState) buildBothManifests(env modSyncEnv, stateHash string) (*mo
 	for _, jar := range jars {
 		h, err := modSyncSha1File(jar)
 		if err != nil {
-			modSyncLogWarn("hash failed %s: %s", filepath.Base(jar), err.Error())
+			modSyncLogWarn("hash failed {}: {}", filepath.Base(jar), err.Error()) // ModSyncManifestService.java:238
 			continue
 		}
 		if _, seen := sha1ToJarName[h]; !seen {
@@ -469,7 +469,7 @@ func (s *modSyncState) buildBothManifests(env modSyncEnv, stateHash string) (*mo
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	modSyncLogInfo("manifests ready: %d jars, required=%d all=%d unknown=%d state=%s %dms",
+	modSyncLogInfo("manifests ready: {} jars, required={} all={} unknown={} state={} {}ms", // ModSyncManifestService.java:357
 		len(jars), requiredCount, allCount, len(unknownMods), short, time.Now().UnixMilli()-start)
 	return out, nil
 }
@@ -500,7 +500,7 @@ func modSyncRequiredDepIds(version map[string]any) []string {
 // 元数据缺失按 "fail-open" 判否。
 func modSyncIsClientRequiredRoot(project map[string]any, projectID string) bool {
 	if project == nil {
-		modSyncLogWarn("isClientRequiredRoot: project meta missing for %s (fail-open, not a root)", projectID)
+		modSyncLogWarn("isClientRequiredRoot: project meta missing for {} (fail-open, not a root)", projectID) // ModSyncManifestService.java:399
 		return false
 	}
 	cs := jstr(project, "client_side")
@@ -547,7 +547,7 @@ func (s *modSyncState) proactivePushBothScopes() {
 	}
 	root, err := s.ensureCache()
 	if err != nil {
-		modSyncLogWarn("proactive push skipped: %s", err.Error())
+		modSyncLogWarn("proactive push skipped: {}", err.Error())
 		return
 	}
 	for _, scope := range []string{modSyncScopeRequired, modSyncScopeAll} {
@@ -556,10 +556,10 @@ func (s *modSyncState) proactivePushBothScopes() {
 			continue
 		}
 		if err := app.modSyncAnswer(code, token, "push-"+strconv.FormatInt(time.Now().UnixNano(), 36), scope, manifest); err != nil {
-			modSyncLogWarn("proactive push %s failed: %s", scope, err.Error())
+			modSyncLogWarn("proactive push {} failed: {}", scope, err.Error())
 			continue
 		}
-		modSyncLogInfo("proactive push %s ok (%d mods)", scope, modSyncModsLen(manifest))
+		modSyncLogInfo("proactive push {} ok ({} mods)", scope, modSyncModsLen(manifest))
 	}
 }
 
@@ -606,10 +606,10 @@ func (a *App) ModSyncRebuild() string {
 		s.cacheMu.Unlock()
 		root, err := s.ensureCache()
 		if err != nil {
-			modSyncLogWarn("manual rebuild failed: %s", err.Error())
+			modSyncLogWarn("manual rebuild failed: {}", err.Error())
 			return
 		}
-		modSyncLogInfo("manual rebuild ok: required=%d all=%d", modSyncModsLen(root.Required), modSyncModsLen(root.All))
+		modSyncLogInfo("manual rebuild ok: required={} all={}", modSyncModsLen(root.Required), modSyncModsLen(root.All))
 		s.proactivePushBothScopes()
 	})
 	return wrapOK(map[string]any{"queued": true})

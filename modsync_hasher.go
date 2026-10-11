@@ -54,7 +54,7 @@ func modSyncListJarsWithDisabled(dir string) modSyncJarScan {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		// Java 的 IOException 分支（:66-68）：warn 后带已有结果返回
-		modSyncLogWarn("listModJars failed: %s", err.Error())
+		modSyncLogWarn("listModJars failed: {}", err.Error()) // ModSyncFileHasher.java:67
 		return out
 	}
 
@@ -105,7 +105,7 @@ func modSyncListJarsWithDisabled(dir string) modSyncJarScan {
 	}
 
 	if len(out.Jars)+len(out.Disabled) > modSyncMaxJars {
-		modSyncLogWarn("mods 数量超过 %d，超出部分未参与校验 (jars=%d, disabled=%d)",
+		modSyncLogWarn("mods 数量超过 {}，超出部分未参与校验 (jars={}, disabled={})", // ModSyncFileHasher.java:72
 			modSyncMaxJars, len(out.Jars), len(out.Disabled))
 		// 仅截断活跃 jar（disabled 不参与哈希），保留 disabled 信息
 		if len(out.Jars) > modSyncMaxJars {

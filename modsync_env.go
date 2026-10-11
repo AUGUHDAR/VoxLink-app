@@ -426,7 +426,7 @@ func (q *modSyncTaskQueue) run() {
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
-					modSyncLogWarn("host manifest task failed: %v", rec)
+					modSyncLogWarn("host manifest task failed: {}", rec)
 				}
 			}()
 			task()
