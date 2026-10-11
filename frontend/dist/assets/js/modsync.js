@@ -707,6 +707,23 @@
 
   /* ---------------- 包装 VL.api：JoinRoom 前先过门控 ---------------- */
   var rawApi = VL.api;
+
+  // 前置校验（2026-10-11 裁决）：房主没开启 mod 清单上传、或清单本来就是空的，
+  // 就不该问玩家"检查范围/装到哪个实例"。后端 modSyncRoomSupportsManifest 那道同类判定
+  // 跑在 ModSyncGate 里，也就是玩家答完弹窗之后，等于没有前置——Happy Link 房与空清单房
+  // 因此照样弹窗。这里在弹之前先问一次 /room/mods。
+  // 查询失败一律按"需要检查"处理：宁可多问一句，不擅自跳过玩家显式打开的开关。
+  function roomNeedsModSync(code) {
+    return rawApi("GetRoomMods", code).then(function (res) {
+      if (!res || res.ok === false) return true;
+      var d = res.data || {};
+      if (d.supported === false) return false; // 房主未上传清单（含 Happy Link 镜像房）
+      // 与后端门控同一条规则（modsync_guest.go:295）：必装清单与未知清单都空 = 无可同步内容
+      var mods = d.mods || [], unknown = d.unknownMods || [];
+      return !(mods.length === 0 && unknown.length === 0);
+    }).catch(function () { return true; });
+  }
+
   VL.api = async function (name) {
     var args = Array.prototype.slice.call(arguments, 1);
     if (name === "JoinRoom") {
@@ -717,7 +734,7 @@
       if (settings.configured && settings.joinRequiredModsCheck) {
         var code = "";
         try { code = (JSON.parse(args[0] || "{}").code || "").toUpperCase(); } catch (e) { code = ""; }
-        if (code) {
+        if (code && await roomNeedsModSync(code)) {
           VL.api("ModSyncClearGate", code).catch(function () { });
           await runGate(code); // 玩家取消 → 仍继续原有 JoinRoom 流程由上层按钮状态决定
         }
