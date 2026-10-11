@@ -48,8 +48,11 @@ import (
 )
 
 const (
-	modrinthAPI          = "https://api.modrinth.com/v2"
-	modrinthMirrorAPI    = "https://mod.mcimirror.top/modrinth"
+	modrinthAPI = "https://api.modrinth.com/v2"
+	// 镜像必须带 /v2：MCIM 的映射是 /modrinth/v2/* → api.modrinth.com/v2/*，
+	// 少了 /v2 全部 404（实测 /modrinth/project/... = 404，/modrinth/v2/project/... = 200），
+	// 于是"镜像优先"形同虚设，国内每次 API 调用都白等一轮再掉到官方。
+	modrinthMirrorAPI    = "https://mod.mcimirror.top/modrinth/v2"
 	modrinthMirrorPrefix = "https://mod.mcimirror.top"
 
 	modrinthMirrorTimeout  = 8 * time.Second  // ModrinthClient.java:37
@@ -585,6 +588,10 @@ func modrinthDoDownload(cli *http.Client, rawURL, expectedSha512, expectedSha1, 
 
 	resp, err := cli.Do(req)
 	headersArrived.Store(true)
+	// 看门狗只管到"响应头到达"：Java 的 HttpRequest.timeout(20s) 约束的是响应，
+	// 不约束响应体流。此前不在此处停表，任何 20s 没下完的文件都会被自己取消
+	// （实测 fabric-api 走 CDN 42s 报 "context canceled"，ModSync 永远装不完大模组）。
+	watchdog.Stop()
 	if err != nil {
 		if abortByUser.Load() {
 			return 0, &modrinthAbortedError{name: fileName}
