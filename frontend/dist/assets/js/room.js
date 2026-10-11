@@ -36,28 +36,28 @@
 
     switch (type) {
       case "join_request":
-        cls = "t-info"; text = "玩家请求加入";
+        cls = "t-info"; text = VL.t("voxlink.app.signal.join_request", "玩家请求加入");
         detail = [s.data && s.data.playerName, s.data && s.data.gameVersion]
           .filter(Boolean).join(" · ");
         break;
       case "connected":
-        cls = "t-good"; text = "已连接 awa";
+        cls = "t-good"; text = VL.t("voxlink.connection.connected", "已连接 awa");
         if (s.data && s.data.playerName) detail = s.data.playerName;
         break;
       case "disconnect":
-        cls = "t-warn"; text = "玩家断开";
+        cls = "t-warn"; text = VL.t("voxlink.app.signal.player_left", "玩家断开");
         if (s.data && s.data.playerName) detail = s.data.playerName;
         break;
       case "host_closing":
-        cls = "t-bad"; text = "房主已关闭房间";
+        cls = "t-bad"; text = VL.t("voxlink.room_lost.host_closed", "房主把房间关了 :(");
         break;
       case "room_evicted":
-        cls = "t-bad"; text = "房间被挤出，不能进新人了";
+        cls = "t-bad"; text = VL.t("voxlink.room_lost.room_evicted", "房间太多了，你的已被移除，但已在房间里的玩家不受影响");
         break;
       case "turn_ready":
       case "turn_alloc":
       case "turn_bg_punch":
-        cls = "t-dim"; text = "TURN 中继活动";
+        cls = "t-dim"; text = VL.t("voxlink.app.signal.turn", "TURN 中继活动");
         if (s.data) {
           var d = s.data;
           var bits = [d.node || d.relay || d.host, d.state || d.phase].filter(Boolean);
@@ -82,7 +82,7 @@
     var empty = VL.$("#signal-empty");
     var count = VL.$("#signal-count");
     if (!list) return;
-    count.textContent = signals.length + " 条";
+    count.textContent = VL.t("voxlink.app.room.signal_count", "%s 条", signals.length);
     empty.classList.toggle("hidden", signals.length > 0);
     list.innerHTML = signals.map(renderSignalItem).join("");
   }
@@ -128,17 +128,20 @@
     data = data || {};
 
     if (data.supported === false) {
-      body.innerHTML = '<div class="mini-note">房主未开启 ModSync 或当前版本不支持必装清单 qwq</div>';
+      body.innerHTML = '<div class="mini-note">' +
+        VL.esc(VL.t("voxlink.app.mods.unsupported", "房主未开启 ModSync 或当前版本不支持必装清单 qwq")) + "</div>";
       return;
     }
     if (!data.ready) {
-      body.innerHTML = '<div class="mini-note">房主未发布必装清单，先进游戏等一等吧 (・ω・)</div>';
+      body.innerHTML = '<div class="mini-note">' +
+        VL.esc(VL.t("voxlink.app.mods.not_published", "房主未发布必装清单，先进游戏等一等吧 (・ω・)")) + "</div>";
       return;
     }
 
     var mods = data.mods || [];
     if (!mods.length) {
-      body.innerHTML = '<div class="mini-note">房主发布了空清单——不需要额外 Mod，直接进 :D</div>';
+      body.innerHTML = '<div class="mini-note">' +
+        VL.esc(VL.t("voxlink.app.mods.empty", "房主发布了空清单——不需要额外 Mod，直接进 :D")) + "</div>";
       return;
     }
 
@@ -146,7 +149,8 @@
       var m1 = m || {};
       return (
         "<tr>" +
-        '<td class="strong" title="' + VL.esc(m1.title || "") + '">' + VL.esc(m1.title || m1.fileName || "未知 Mod") + "</td>" +
+        '<td class="strong" title="' + VL.esc(m1.title || "") + '">' +
+        VL.esc(m1.title || m1.fileName || VL.t("voxlink.app.mods.unknown_mod", "未知 Mod")) + "</td>" +
         '<td title="' + VL.esc(m1.fileName || "") + '">' + VL.esc(m1.fileName || "-") + "</td>" +
         "<td>" + VL.esc(m1.versionNumber || "-") + "</td>" +
         "<td>" + VL.esc(VL.fmtSize(m1.size)) + "</td>" +
@@ -163,7 +167,10 @@
     body.innerHTML =
       head +
       '<table class="mini-table"><thead><tr>' +
-      "<th>名称</th><th>文件</th><th>版本</th><th>大小</th>" +
+      "<th>" + VL.esc(VL.t("voxlink.app.mods.col_name", "名称")) + "</th>" +
+      "<th>" + VL.esc(VL.t("voxlink.app.mods.col_file", "文件")) + "</th>" +
+      "<th>" + VL.esc(VL.t("voxlink.app.mods.col_version", "版本")) + "</th>" +
+      "<th>" + VL.esc(VL.t("voxlink.app.mods.col_size", "大小")) + "</th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table>";
   }
 
@@ -192,7 +199,7 @@
       if (cur && !catSel.querySelector('option[value="' + cur.replace(/"/g, '\\"') + '"]')) {
         var opt = document.createElement("option");
         opt.value = cur;
-        opt.textContent = cur + "（自定义）";
+        opt.textContent = cur + VL.t("voxlink.app.category.custom_suffix", "（自定义）");
         catSel.appendChild(opt);
       }
       catSel.value = cur;
@@ -214,7 +221,7 @@
     btn.disabled = true;
     try {
       await VL.api("SendRoomUpdate", JSON.stringify(req));
-      VL.toast("已保存", "success");
+      VL.toast(VL.t("voxlink.app.action.saved", "已保存"), "success");
       VL.$("#hs-pw").value = "";
     } catch (e) {
       if (e.code !== "NO_BACKEND") VL.toast(VL.errText(e), "error");
@@ -229,11 +236,15 @@
       leaveArmed = true;
       btn.classList.add("armed");
       var label = btn.querySelector("span:last-child");
-      label.textContent = session.isHost ? "确认关闭？" : "确认离开？";
+      label.textContent = session.isHost
+        ? VL.t("voxlink.app.room.confirm_close", "确认关闭？")
+        : VL.t("voxlink.app.room.confirm_leave", "确认离开？");
       setTimeout(function () {
         leaveArmed = false;
         btn.classList.remove("armed");
-        label.textContent = session.isHost ? "关闭房间" : "离开房间";
+        label.textContent = session.isHost
+          ? VL.t("voxlink.app.room.close", "关闭房间")
+          : VL.t("voxlink.app.room.leave", "离开房间");
       }, 3000);
       return;
     }
@@ -261,36 +272,59 @@
 
   // 阶段文案：turn/prelay 取自 lang 键 voxlink.auto_relay.turn / .player（lang/zh_cn.json:464-466），
   // 模组在编排器发起该通道时把同一句写进 connectionMode（ConnectionManager:12834 / :12843 / :12879）。
+  // 每一项都是 [语言键, 中文原文]：文案要在渲染时查表，不能在文件加载时定死，
+  // 否则中途换语言就得重开程序才生效。
+  function txt(pair) { return pair ? VL.t(pair[0], pair[1]) : ""; }
+
   var CONN_TEXT = {
-    p2p:    { label: "P2P 打洞",  trying: "P2P 打洞进行中…" },
-    direct: { label: "直连",      trying: "正在尝试直连…",   failed: "连接失败，对方可能是其他游戏、不兼容的版本或网络不可达" },
-    prelay: { label: "玩家中继",  trying: "自动使用玩家中继…", failed: "中继失败，继续尝试直连打洞..." },
-    turn:   { label: "TURN 中继", trying: "直连未通，自动使用中继…", failed: "中继不可用，继续尝试直连" },
+    p2p: {
+      label: ["voxlink.app.conn.p2p", "P2P 打洞"],
+      trying: ["voxlink.app.conn.p2p_trying", "P2P 打洞进行中…"]
+    },
+    direct: {
+      label: ["voxlink.app.conn.direct", "直连"],
+      trying: ["voxlink.app.conn.direct_trying", "正在尝试直连…"],
+      failed: ["voxlink.app.conn.direct_failed", "连接失败，对方可能是其他游戏、不兼容的版本或网络不可达"]
+    },
+    prelay: {
+      label: ["voxlink.app.conn.player_relay", "玩家中继"],
+      trying: ["voxlink.auto_relay.player", "自动使用玩家中继…"],
+      failed: ["voxlink.relay.failed_retry_punch", "中继失败，继续尝试直连打洞..."]
+    },
+    turn: {
+      label: ["voxlink.app.conn.turn_relay", "TURN 中继"],
+      trying: ["voxlink.auto_relay.turn", "直连未通，自动使用中继…"],
+      failed: ["voxlink.turn.failed", "中继不可用，继续尝试直连"]
+    },
     // 互通房（Happy Link 镜像）：lang 键 voxlink.connection.fed_setup / fed_failed 同文案
-    fed:    { label: "互通中继",  trying: "正在通过互通中继连接房间...", failed: "互通房间连接失败" }
+    fed: {
+      label: ["voxlink.app.conn.fed", "互通中继"],
+      trying: ["voxlink.connection.fed_setup", "正在通过互通中继连接房间..."],
+      failed: ["voxlink.connection.fed_failed", "互通房间连接失败"]
+    }
   };
 
   // 连接卡软提示按房间类型区分：mod 房（必是 MC）→ 版本不兼容；app 房 → 其他游戏/版本。
-  var SOFT_HINT_APP  = "若无法进入，对方可能是其他游戏或不兼容的版本";
-  var SOFT_HINT_MOD  = "若无法进入，可能是 MC 版本不兼容";
-  var FAILED_HINT_MOD = "连接失败，可能是版本不兼容或网络不可达";
+  var SOFT_HINT_APP = ["voxlink.app.conn.soft_app", "若无法进入，对方可能是其他游戏或不兼容的版本"];
+  var SOFT_HINT_MOD = ["voxlink.app.conn.soft_mod", "若无法进入，可能是 MC 版本不兼容"];
+  var FAILED_HINT_MOD = ["voxlink.app.conn.failed_mod", "连接失败，可能是版本不兼容或网络不可达"];
 
   // 3 秒瞬态提示文案（沿检测专用），逐条对应模组 lang 键：
   var CONN_HINT = {
     // voxlink.relay.failed_retry_punch（lang/zh_cn.json:241）
     // 模组沿检测：玩家中继"进行中→空闲且未连上"= 自动尝试失败（AttemptingJoinScreen:645-648, :697-704）
-    relayFailed: "中继失败，继续尝试直连打洞...",
+    relayFailed: ["voxlink.relay.failed_retry_punch", "中继失败，继续尝试直连打洞..."],
     // voxlink.turn.failed（lang/zh_cn.json:386）
     // 模组沿检测：TURN"忙→空闲且未连上"（AttemptingJoinScreen:651-658, :706-713）
-    turnFailed: "中继不可用，继续尝试直连",
+    turnFailed: ["voxlink.turn.failed", "中继不可用，继续尝试直连"],
     // voxlink.logui.auto_relay_dead（lang/zh_cn.json:469，ConnectionManager:12958）
     // 同一条沿，但这条道曾经承载过流量 → 是"建起来却哑了"，不是建不起来
-    relayDead: "中继通道无响应，自动换道"
+    relayDead: ["voxlink.logui.auto_relay_dead", "中继通道无响应，自动换道"]
   };
   // 可见时长：模组常量 RELAY_FAILED_MSG_MS = 3000（AttemptingJoinScreen:40）
   var CONN_HINT_MS = 3000;
   // 中继两道的 exhausted 兜底文案：voxlink.auto_relay.exhausted（lang/zh_cn.json:466）
-  var CONN_EXHAUSTED = "中继均不可用，继续打洞…";
+  var CONN_EXHAUSTED = ["voxlink.auto_relay.exhausted", "中继均不可用，继续打洞…"];
 
   var conn = null;
 
@@ -304,7 +338,7 @@
   function connTickRender() {
     if (!conn || conn.status !== "trying") return;
     var sec = Math.max(0, Math.floor((Date.now() - conn.startedAt) / 1000));
-    VL.$("#conn-timer").textContent = "已用时 " + sec + "s";
+    VL.$("#conn-timer").textContent = VL.t("voxlink.app.room.elapsed", "已用时 %ss", sec);
   }
 
   function connStartTick() {
@@ -339,7 +373,8 @@
     if (!conn) return;
     if (phase !== "prelay" && phase !== "turn") return;
     conn.lanes[phase] = true;
-    connShowHint(conn.address ? CONN_HINT.relayDead : (phase === "prelay" ? CONN_HINT.relayFailed : CONN_HINT.turnFailed));
+    connShowHint(conn.address ? txt(CONN_HINT.relayDead)
+      : (phase === "prelay" ? txt(CONN_HINT.relayFailed) : txt(CONN_HINT.turnFailed)));
   }
 
   function connRender() {
@@ -350,7 +385,7 @@
     }
     card.classList.remove("hidden");
     var t = CONN_TEXT[conn.phase] || CONN_TEXT.p2p;
-    VL.$("#conn-phase-label").textContent = t.label;
+    VL.$("#conn-phase-label").textContent = txt(t.label);
 
     var box = VL.$("#conn-phase-box");
     var spin = VL.$("#conn-spinner");
@@ -371,11 +406,11 @@
     box.classList.remove("hidden");
     box.classList.toggle("is-failed", failed);
     // failed 文案按房间 clientType 区分：mod 房（必是 MC）→ 版本不兼容；app 房 → 其他游戏/版本。
-    var failedText = t.failed || "连接失败";
+    var failedText = t.failed ? txt(t.failed) : VL.t("voxlink.connection.failed", "连接失败");
     if (failed && conn.phase !== "p2p" && session.clientType === "mod") {
-      failedText = FAILED_HINT_MOD;
+      failedText = txt(FAILED_HINT_MOD);
     }
-    text.textContent = exhausted ? CONN_EXHAUSTED : (failed ? failedText : t.trying);
+    text.textContent = exhausted ? txt(CONN_EXHAUSTED) : (failed ? failedText : txt(t.trying));
     spin.classList.toggle("hidden", failed);
     timer.classList.toggle("hidden", failed);
     if (!failed) connTickRender();
@@ -395,12 +430,13 @@
       success.classList.remove("hidden");
       VL.$("#conn-addr").textContent = conn.address || "-";
       var isTunnel = (conn.address || "").indexOf("127.0.0.1") === 0;
-      VL.$("#conn-success-extra").textContent = isTunnel ? "（本地映射端口，保持本窗口开启）" : "";
+      VL.$("#conn-success-extra").textContent = isTunnel
+        ? VL.t("voxlink.app.room.local_map_note", "（本地映射端口，保持本窗口开启）") : "";
       // 直接连成功卡淡色小字（兼容提示，不点破）
       // mod 房（必是 MC）→ 强调"可能是 MC 版本不兼容"；app 房保留"对方可能是其他游戏/版本"。
       var soft = VL.$("#conn-success-soft");
       if (soft) {
-        soft.textContent = (session.clientType === "mod") ? SOFT_HINT_MOD : SOFT_HINT_APP;
+        soft.textContent = (session.clientType === "mod") ? txt(SOFT_HINT_MOD) : txt(SOFT_HINT_APP);
         soft.classList.remove("hidden");
       }
     }
@@ -525,22 +561,23 @@
   }
 
   function renderRoomHeader() {
-    VL.$("#room-name").textContent = session.name || "房间";
+    VL.$("#room-name").textContent = session.name || VL.t("voxlink.app.room.title", "房间");
     VL.$("#room-code").textContent = session.code || "------";
     VL.$("#room-players").innerHTML =
       '<span class="ico">' + VL.iconSvg("users") + "</span>" +
-      (session.currentPlayers || 0) + " / " + (session.maxPlayers || 0) + " 人";
+      VL.esc(VL.t("voxlink.app.room.players_count", "%s / %s 人",
+        session.currentPlayers || 0, session.maxPlayers || 0));
 
     var pill = VL.$("#room-status-pill");
     var leaveText = VL.$("#room-leave-text");
     if (session.isHost) {
-      pill.textContent = "等待玩家";
+      pill.textContent = VL.t("voxlink.app.room.waiting", "等待玩家");
       pill.className = "pill pill-accent";
-      leaveText.textContent = "关闭房间";
+      leaveText.textContent = VL.t("voxlink.app.room.close", "关闭房间");
     } else {
-      pill.textContent = "已连接";
+      pill.textContent = VL.t("voxlink.app.room.connected", "已连接");
       pill.className = "pill pill-success";
-      leaveText.textContent = "离开房间";
+      leaveText.textContent = VL.t("voxlink.app.room.leave", "离开房间");
     }
     leaveArmed = false;
   }
@@ -570,8 +607,10 @@
   function resetRoomPage() {
     signals = [];
     renderSignals();
-    VL.$("#netlog-body").innerHTML = '<div class="netlog-line netlog-faint">暂无日志</div>';
-    VL.$("#mods-body").innerHTML = '<div class="mini-note">正在加载必装清单…</div>';
+    VL.$("#netlog-body").innerHTML = '<div class="netlog-line netlog-faint">' +
+      VL.esc(VL.t("voxlink.app.room.netlog_empty", "暂无日志")) + "</div>";
+    VL.$("#mods-body").innerHTML = '<div class="mini-note">' +
+      VL.esc(VL.t("voxlink.app.mods.loading", "正在加载必装清单…")) + "</div>";
     leaveArmed = false;
     var btn = VL.$("#room-leave");
     btn.classList.remove("armed");
@@ -631,6 +670,15 @@
       VL.$("#netlog-arrow").classList.toggle("collapsed");
     });
 
+    // 换语言后重画房间页：头部、信令流、连接卡都按现有会话数据重说一遍。
+    // 不重跑 fillHostSettings：它会拿 session 里的旧值盖掉房主正在输入框里改到一半的房间名；
+    // 连接日志的行是后端推来的原文，也不在这儿重写（等于改写已经发生过的事实）。
+    VL.onLangChange(function () {
+      if (VL.roomInSession()) renderRoomHeader();
+      renderSignals();
+      connRender();
+    });
+
     // 启动时同步一次会话状态
     (async function () {
       try {
@@ -652,11 +700,13 @@
       var page = VL.currentPage && VL.currentPage();
       if (page !== "room") VL.enterRoomPage(payload.room || {}, { silent: true });
     } else if (st === "closed") {
-      var msg = payload.message || (session.isHost ? "房间已关闭" : "已离开房间");
+      var msg = payload.message || (session.isHost
+        ? VL.t("voxlink.room_closed", "房间已关闭")
+        : VL.t("voxlink.app.room.left", "已离开房间"));
       VL.toast(msg, "info");
       VL.exitRoomToLobby();
     } else if (st === "error") {
-      VL.toast(payload.message || "连接出错了 qwq", "error");
+      VL.toast(payload.message || VL.t("voxlink.connection.monitor_error", "连接出了点问题 :("), "error");
     } else if (st === "idle") {
       // LeaveRoom 成功后的回执
       if (VL.roomInSession()) VL.exitRoomToLobby();

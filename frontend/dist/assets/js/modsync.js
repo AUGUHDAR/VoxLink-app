@@ -99,13 +99,17 @@
     "voxlink.app.modsync.saved_instance": "已保存实例「%s」"
   };
 
+  // 查表交给 VL.t（后端语言包优先），这张 LANG 表原样留着当"中文兜底 + 应用端自有文案"：
+  // voxlink.modsync.* / voxlink.logui.modsync_* 这些键在模组 lang 里都有，切语言时会自动换成
+  // 对应语言；voxlink.app.modsync.* 是应用端自己的键，lang 里没有，于是继续用下面这句中文。
   function t(key) {
-    var s = LANG[key];
-    if (s === undefined) s = key;
-    for (var i = 1; i < arguments.length; i++) {
-      s = s.replace("%s", arguments[i] === undefined || arguments[i] === null ? "" : String(arguments[i]));
-    }
-    return s;
+    var args = Array.prototype.slice.call(arguments, 1);
+    return VL.t.apply(null, [key, LANG[key]].concat(args));
+  }
+  // LANG 表里没有的键（例如与房间页同款的"未知 Mod"）也走 VL.t：兜底中文就写在调用处
+  function t2(key, cn) {
+    var args = Array.prototype.slice.call(arguments, 2);
+    return VL.t.apply(null, [key, cn].concat(args));
   }
   // 后端返回的是 {key,args}（语言键不硬编码进 Go），这里统一渲染
   function line(obj) {
@@ -244,7 +248,14 @@
   function closeModal() {
     var m = ensureModal();
     m.root.classList.add("hidden");
+    modalView = null; // 换语言时只重画还开着的那一屏
   }
+
+  // 当前弹窗停在哪一屏、以及重画那一屏所需的数据：换语言时能纯靠已有数据重说的才重说。
+  // 「选实例」那一屏带着玩家填到一半的输入框，重跑一次等于把他的输入清空，所以不重画。
+  var modalView = null;
+  var lastProgress = null;
+  var lastRestart = null;
 
   /* ---------------- 条目卡片（对应 SelectScreen.addEntryCard :156-169） ---------------- */
   function entryCard(e, showCopy) {
@@ -256,7 +267,7 @@
       : '<span class="modsync-ph">' + VL.esc((e.title || "?").slice(0, 1)) + "</span>";
     return (
       '<div class="modsync-card">' + icon +
-      '<div style="flex:1"><div>' + VL.esc(e.title || e.fileName || "未知 Mod") +
+      '<div style="flex:1"><div>' + VL.esc(e.title || e.fileName || t2("voxlink.app.mods.unknown_mod", "未知 Mod")) +
       (showCopy !== false ? ' <button class="btn btn-ghost btn-sm" data-copy="' +
         VL.esc(e.title || e.fileName || "") + '">' + t("voxlink.modsync.copy") + "</button>" : "") +
       '</div><div class="modsync-note">' + sub + "</div></div></div>"
@@ -332,6 +343,7 @@
       t(allScope ? "voxlink.modsync.title_all" : "voxlink.modsync.title"),
       t(allScope ? "voxlink.modsync.subtitle_all" : "voxlink.modsync.subtitle", g.code),
       html, foot);
+    modalView = "diff";
     bindCopyButtons(VL.$("#modsync-body"));
     var dl = VL.$("#modsync-dl");
     if (dl) dl.addEventListener("click", startDownload);
@@ -343,12 +355,16 @@
   function fmtEta(sec) {
     if (!sec || sec < 0) return "--";
     var m = Math.floor(sec / 60), s = sec % 60;
-    return m > 0 ? (m + " 分 " + s + " 秒") : (s + " 秒");
+    return m > 0
+      ? t2("voxlink.app.modsync.eta_m_s", "%s 分 %s 秒", m, s)
+      : t2("voxlink.app.modsync.eta_s", "%s 秒", s);
   }
 
   function renderProgress(p) {
     var body = VL.$("#modsync-body");
     if (!body || !gateState) return;
+    modalView = "progress";
+    lastProgress = p;
     var total = p.total || 0, done = p.done || 0;
     var html =
       '<div class="modsync-h">' + VL.esc(t("voxlink.modsync.progress_title")) + "</div>" +
@@ -377,6 +393,8 @@
     if (res.outcome === "done") {
       // RestartScreen：全屏遮罩、唯一出口=退出游戏。应用端等价：告知必须重启 MC 实例，
       // 然后由玩家决定何时进入房间（不自动放行，避免装完 mod 却没重启就崩）。
+      modalView = "restart";
+      lastRestart = res;
       openModal(t("voxlink.modsync.restart_title"), "",
         '<div class="modsync-h">' + VL.esc(line({ key: "voxlink.modsync.restart_line1", args: [res.downloaded] })) + "</div>" +
         '<div class="modsync-note">' + VL.esc(t("voxlink.modsync.restart_line2")) + "</div>" +
@@ -614,6 +632,7 @@
         '<button class="btn btn-primary" id="ms-required">' + VL.esc(t("voxlink.modsync.scope_required")) + "</button>" +
         '<button class="btn btn-ghost" id="ms-all">' + VL.esc(t("voxlink.modsync.scope_all")) + "</button>" +
         '<button class="btn btn-ghost" id="ms-skip">' + VL.esc(t("voxlink.modsync.skip_check")) + "</button>");
+      modalView = "scope";
 
       var sel = VL.$("#ms-inst");
       if (sel) {
@@ -647,6 +666,7 @@
             t(scope === "all" ? "voxlink.modsync.checking_all" : "voxlink.modsync.checking")) + "</div>",
           '<button class="btn btn-ghost" id="ms-skip2">' + VL.esc(t("voxlink.modsync.skip_check")) + "</button>" +
           '<button class="btn btn-ghost" id="ms-cancel2">' + VL.esc(t("voxlink.modsync.back")) + "</button>");
+        modalView = "checking";
         VL.$("#ms-skip2").addEventListener("click", function () {
           if (settled) return;
           settled = true;
@@ -707,10 +727,12 @@
   };
 
   /* ---------------- 房间页：门控直通提示 flush + 房主清单面板 ---------------- */
+  var hostPanelRoom = null; // 进房那次的 room：换语言时拿它重画一次房主面板，不重新问后端要会话
   var prevEnter = VL.enterRoomPage;
   VL.enterRoomPage = function (room, opts) {
     if (prevEnter) prevEnter.apply(VL, arguments);
     flushPendingNote();
+    hostPanelRoom = room || null;
     renderHostPanel(room);
   };
 
@@ -753,8 +775,8 @@
           '<div class="modsync-note">' + VL.esc([
             st.loader, st.mcVersion,
             (st.jarCount || 0) + " jar",
-            "必装 " + (st.required || 0),
-            "全部 " + (st.all || 0)
+            t2("voxlink.app.modsync.required_count", "必装 %s", st.required || 0),
+            t2("voxlink.app.modsync.all_count", "全部 %s", st.all || 0)
           ].filter(Boolean).join(" · ")) + "</div>" +
           '<div class="modsync-note">' + VL.esc(st.modsDir || "") + "</div>" +
           '<button class="btn btn-ghost btn-sm" id="modsync-rebuild">' +
@@ -767,7 +789,7 @@
     var btn = VL.$("#modsync-rebuild", box);
     if (btn) btn.addEventListener("click", function () {
       btn.disabled = true;
-      rawApi("ModSyncRebuild").then(function () { VL.toast("清单重建已排队", "success"); },
+      rawApi("ModSyncRebuild").then(function () { VL.toast(t2("voxlink.app.modsync.rebuild_queued", "清单重建已排队"), "success"); },
         function (e) { if (e.code !== "NO_BACKEND") VL.toast(VL.errText(e), "error"); });
       btn.disabled = false;
     });
@@ -778,6 +800,16 @@
     loadSettings();
     // MC 实例与两个必装开关都在「创建房间 / 设置」页配置（create.js / settings.js），
     // 加入侧只在门控前读一份现状；从没建过房的玩家由 askScope 就地补一个实例。
+
+    // 换语言时把弹窗正停着的那一屏按已有数据重说一遍。「选实例」「检查中」两屏不动：
+    // 前者的输入框里有玩家填到一半的东西，后者的按钮回调关在那一屏的闭包里，
+    // 重跑一次要么清空输入要么丢掉回调；这两屏等后端下一条消息自然会用新语言重画。
+    VL.onLangChange(function () {
+      if (modalView === "diff" && gateState) renderDiff();
+      else if (modalView === "progress" && lastProgress) renderProgress(lastProgress);
+      else if (modalView === "restart" && lastRestart) renderDownloadDone(lastRestart);
+      if (hostPanelRoom) renderHostPanel(hostPanelRoom);
+    });
   }
 
   if (document.readyState === "loading") {

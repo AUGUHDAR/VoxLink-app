@@ -91,11 +91,11 @@ window.VL = window.VL || {};
     var t = Number(ts);
     if (!isFinite(t) || t <= 0) return "";
     var diff = Math.max(0, Date.now() - t);
-    if (diff < 10 * 1000) return "刚刚";
-    if (diff < 60 * 1000) return Math.floor(diff / 1000) + " 秒前";
-    if (diff < 60 * 60 * 1000) return Math.floor(diff / 60000) + " 分钟前";
-    if (diff < 24 * 60 * 60 * 1000) return Math.floor(diff / 3600000) + " 小时前";
-    return Math.floor(diff / 86400000) + " 天前";
+    if (diff < 10 * 1000) return VL.t("voxlink.app.time.just", "刚刚");
+    if (diff < 60 * 1000) return VL.t("voxlink.app.time.seconds_ago", "%s 秒前", Math.floor(diff / 1000));
+    if (diff < 60 * 60 * 1000) return VL.t("voxlink.app.time.minutes_ago", "%s 分钟前", Math.floor(diff / 60000));
+    if (diff < 24 * 60 * 60 * 1000) return VL.t("voxlink.app.time.hours_ago", "%s 小时前", Math.floor(diff / 3600000));
+    return VL.t("voxlink.app.time.days_ago", "%s 天前", Math.floor(diff / 86400000));
   };
 
   VL.debounce = function (fn, wait) {
@@ -113,7 +113,7 @@ window.VL = window.VL || {};
   VL.api = async function (name) {
     var bridge = window.go && window.go.main && window.go.main.App;
     if (!bridge || typeof bridge[name] !== "function") {
-      var err = new Error("请在桌面 App 中运行");
+      var err = new Error(VL.t("voxlink.app.error.no_backend", "请在桌面 App 中运行"));
       err.code = "NO_BACKEND";
       VL.toast(err.message, "error");
       throw err;
@@ -123,7 +123,7 @@ window.VL = window.VL || {};
     try {
       raw = await bridge[name].apply(bridge, args);
     } catch (e) {
-      var callErr = new Error((e && e.message) || "调用后端失败");
+      var callErr = new Error((e && e.message) || VL.t("voxlink.app.error.bridge_failed", "调用后端失败"));
       callErr.code = "BRIDGE_ERROR";
       throw callErr;
     }
@@ -134,7 +134,7 @@ window.VL = window.VL || {};
       return raw; // 非 JSON（理论上不会发生），原样返回
     }
     if (res && res.ok === false) {
-      var apiErr = new Error(res.message || res.error || "请求失败");
+      var apiErr = new Error(res.message || res.error || VL.t("voxlink.app.error.request_failed", "请求失败"));
       apiErr.code = res.error || "UNKNOWN";
       throw apiErr;
     }
@@ -148,19 +148,200 @@ window.VL = window.VL || {};
     }
   };
 
+  /* ---------------- 多语言（i18n） ----------------
+   * 语言包只由后端解析：GetSettings 给"用户选了哪种"（auto 或具体代码），
+   * GetLangPack 给那份语言的扁平文案表，目标语言→zh_cn→en_us 的回落链在 Go 侧
+   * （langui.go:121-142），前端不再重算一遍，只负责"取回来 + 查表 + 套用"。
+   * 之所以在前端缓存整张表而不是逐键问后端：界面每帧要查几十个键，桥接调用是异步的。 */
+  var I18N_ATTRS = [
+    ["data-i18n", "text"],
+    ["data-i18n-placeholder", "placeholder"],
+    ["data-i18n-title", "title"],
+    ["data-i18n-aria", "aria-label"]
+  ];
+
+  // 语言名一律用该语言自己的写法（"简体中文"而不是"Chinese"）：这类专有名称不随
+  // 界面语言变化，任何语言下都应显示成本族文字，所以内联在这里而不是走文案表。
+  var LANG_NAMES = {
+    ar_sa: "العربية",
+    de_de: "Deutsch",
+    en_us: "English",
+    es_es: "Español",
+    fr_fr: "Français",
+    ja_jp: "日本語",
+    ko_kr: "한국어",
+    lzh: "文言文",
+    pt_br: "Português (Brasil)",
+    ru_ru: "Русский",
+    zh_cn: "简体中文",
+    zh_hk: "繁體中文（香港）",
+    zh_tw: "繁體中文（台灣）"
+  };
+  VL.langNames = LANG_NAMES;
+  VL.langName = function (code) { return LANG_NAMES[code] || code; };
+
+  VL.lang = { code: "zh_cn", setting: "auto", strings: {}, available: [] };
+
+  VL.hasKey = function (key) {
+    return typeof VL.lang.strings[key] === "string";
+  };
+
+  // %s / %d / %1$s / %% —— 与模组 lang 文件里的占位符写法同一套（Java String.format 的子集）。
+  // 位置参数用 %n$s，顺序参数与位置参数允许混用（顺序计数只在无前缀时前进）。
+  function fmtPlaceholders(str, args) {
+    if (!args.length || str.indexOf("%") < 0) return str;
+    var seq = 0;
+    return str.replace(/%%|%(?:(\d+)\$)?([sd])/g, function (all, idx, type) {
+      if (all === "%%") return "%";
+      var at = idx ? Number(idx) - 1 : seq++;
+      var v = args[at];
+      if (v === undefined || v === null) return "";
+      if (type === "d") {
+        var n = Number(v);
+        return isFinite(n) ? String(Math.round(n)) : String(v);
+      }
+      return String(v);
+    });
+  }
+
+  /**
+   * VL.t(key, 中文原文, ...参数)
+   * 第二个参数是"这个键在当前界面上原本显示的那句中文"：语言包缺键（应用端自有文案、
+   * 或后端不可用）时直接回落到它。选择"调用处传兜底"而不是内联一整份中文表，是因为
+   * 兜底文本就写在用它的地方，不会和 HTML/JS 里的原文两处失配，也不必把 470 键抄进 JS。
+   */
+  VL.t = function (key, fallback) {
+    var args = Array.prototype.slice.call(arguments, 2);
+    var s = VL.lang.strings[key];
+    if (s === undefined) s = fallback;
+    if (s === undefined) s = key; // 连兜底都没给：保持原样显示键名，至少能定位问题
+    if (typeof s !== "string") s = String(s);
+    return fmtPlaceholders(s, args);
+  };
+
+  // 静默版桥接调用：语言包拿不到时界面必须照常显示中文，不能像 VL.api 那样弹 toast。
+  async function bridgeJson(name, arg) {
+    var bridge = window.go && window.go.main && window.go.main.App;
+    if (!bridge || typeof bridge[name] !== "function") return null;
+    try {
+      var raw = arg === undefined ? await bridge[name]() : await bridge[name](arg);
+      var res = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (res && res.ok === false) return null;
+      return res && res.ok === true ? res.data : res;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function systemLangTags() {
+    var list = (navigator.languages && navigator.languages.length)
+      ? Array.prototype.slice.call(navigator.languages)
+      : [navigator.language || navigator.userLanguage || ""];
+    return list.filter(Boolean);
+  }
+
+  // 后端只会"按传来的这一个标签"解析，无法告知它是否真命中；返回的 code 就是它最终用的包，
+  // 拿它的语言段与标签的主语言段一比，就知道该不该继续试下一个系统语言。
+  function packMatchesTag(code, tag) {
+    var base = String(tag).toLowerCase().replace(/_/g, "-").split("-")[0];
+    return String(code || "").toLowerCase().split(/[_-]/)[0] === base;
+  }
+
+  VL.reloadLang = async function () {
+    var auto = !VL.lang.setting || VL.lang.setting === "auto";
+    var tags = auto ? systemLangTags() : [VL.lang.setting];
+    var last = null;
+    for (var i = 0; i < tags.length && i < 4; i++) {
+      var pack = await bridgeJson("GetLangPack", tags[i]);
+      if (!pack) break;
+      last = pack;
+      if (!auto || packMatchesTag(pack.code, tags[i])) break;
+    }
+    if (last) {
+      VL.lang.code = last.code || VL.lang.code;
+      VL.lang.strings = last.strings || {};
+    }
+    return VL.lang;
+  };
+
+  // 启动时先取语言设置再取包；无后端时两者都静默失败，strings 留空 → 全部显示兜底中文。
+  VL.initLang = async function () {
+    var settings = await bridgeJson("GetSettings");
+    if (settings) {
+      VL.lang.setting = settings.language || "auto";
+      if (Array.isArray(settings.languages)) VL.lang.available = settings.languages;
+    }
+    await VL.reloadLang();
+    return VL.lang;
+  };
+
+  // 换语言：以 SaveSettings 的返回值为准（非法代码会被后端原样退回，不能信刚传进去的），
+  // 然后重取语言包、重刷静态文案，再逐个回调各页重画自己渲染出来的那部分。
+  VL.setLanguage = async function (code) {
+    var saved = await bridgeJson("SaveSettings", JSON.stringify({ language: code }));
+    if (saved && saved.language) {
+      VL.lang.setting = saved.language;
+      if (Array.isArray(saved.languages)) VL.lang.available = saved.languages;
+    }
+    await VL.reloadLang();
+    VL.applyI18n(document);
+    notifyLangChange();
+    return VL.lang.setting;
+  };
+
+  var langHooks = [];
+  VL.onLangChange = function (fn) {
+    if (typeof fn === "function") langHooks.push(fn);
+  };
+  function notifyLangChange() {
+    for (var i = 0; i < langHooks.length; i++) {
+      try { langHooks[i](); } catch (e) { /* 某一页重画失败不该拖垮其它页 */ }
+    }
+  }
+
+  // 只改文本节点/属性，绝不新建或包裹节点：按钮里"图标 + 裸文字"这种写法很常见，
+  // 直接赋 textContent 会把图标 span 一起抹掉。
+  function setElText(el, text) {
+    var nodes = [];
+    for (var n = el.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 3 && n.nodeValue.trim()) nodes.push(n);
+    }
+    if (nodes.length === 1) { nodes[0].nodeValue = text; return; }
+    if (!nodes.length && !el.children.length) { el.textContent = text; return; }
+    if (!el.children.length) el.textContent = text; // 多段裸文本：整体替换（当前页面里没有这种）
+  }
+
+  VL.applyI18n = function (root) {
+    var box = root || document;
+    for (var a = 0; a < I18N_ATTRS.length; a++) {
+      var attr = I18N_ATTRS[a][0], kind = I18N_ATTRS[a][1];
+      var nodes = box.querySelectorAll("[" + attr + "]");
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        var key = el.getAttribute(attr);
+        if (!key) continue;
+        var s = VL.lang.strings[key];
+        if (typeof s !== "string") continue; // 缺键：保持 HTML 里原有的中文，别写空白
+        if (kind === "text") setElText(el, s);
+        else el.setAttribute(kind, s);
+      }
+    }
+  };
+
   /* ---------------- 错误文案 ---------------- */
+  // 每条 = [语言键, 当前界面原本的中文]，见 VL.t 的兜底约定。
   var ERROR_TEXT = {
-    RATE_LIMITED: "请求太快啦，休息一下再试 qwq",
-    ROOM_NOT_FOUND_OR_WRONG_PASSWORD: "找不到这个房间 qwq 或密码不对",
-    ROOM_FULL: "房间满了，稍后再来吧 :(",
-    NO_BACKEND: "请在桌面 App 中运行",
-    NETWORK_ERROR: "连不上服务器，检查一下网络或服务器地址吧"
+    RATE_LIMITED: ["voxlink.join_room.error.rate_limited", "请求太快啦，休息一下再试 qwq"],
+    ROOM_NOT_FOUND_OR_WRONG_PASSWORD: ["voxlink.app.error.room_not_found_or_pw", "找不到这个房间 qwq 或密码不对"],
+    ROOM_FULL: ["voxlink.error.room_full", "房间满了，稍后再来吧 :("],
+    NO_BACKEND: ["voxlink.app.error.no_backend", "请在桌面 App 中运行"],
+    NETWORK_ERROR: ["voxlink.error.network_error", "连不上服务器，检查一下网络或服务器地址吧"]
   };
 
   VL.errText = function (err) {
-    if (!err) return "出了点小问题";
-    if (err.code && ERROR_TEXT[err.code]) return ERROR_TEXT[err.code];
-    return err.message || "出了点小问题";
+    if (!err) return VL.t("voxlink.error.unknown", "出了点小问题");
+    if (err.code && ERROR_TEXT[err.code]) return VL.t(ERROR_TEXT[err.code][0], ERROR_TEXT[err.code][1]);
+    return err.message || VL.t("voxlink.error.unknown", "出了点小问题");
   };
 
   /* ---------------- Toast ---------------- */
@@ -206,7 +387,11 @@ window.VL = window.VL || {};
         ta.remove();
       } catch (e) { ok = false; }
     }
-    VL.toast(ok ? "已复制 " + text : "复制失败了 qwq", ok ? "success" : "error");
+    VL.toast(
+      ok ? VL.t("voxlink.chat.copied_to_clipboard", "已复制: %s", text)
+         : VL.t("voxlink.app.copy.failed", "复制失败了 qwq"),
+      ok ? "success" : "error"
+    );
     return ok;
   };
 

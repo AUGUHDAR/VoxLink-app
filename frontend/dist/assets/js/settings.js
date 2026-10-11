@@ -15,6 +15,7 @@
 
   function cacheEls() {
     els.theme = VL.$("#set-theme");
+    els.language = VL.$("#set-language");
     els.relay = VL.$("#set-relay");
     els.msJoin = VL.$("#set-ms-join");
     els.save = VL.$("#set-save");
@@ -48,6 +49,20 @@
     }, function () { /* 后端不可用时保持默认勾选、列表留空，不打扰玩家 */ });
   }
 
+  // 语言下拉的候选来自后端（languages = lang/ 里真有的代码），语言名用该语言自己的写法
+  // （"日本語"而不是"Japanese"）——专有名称不随界面语言变，所以这份对照表内联在 core.js，
+  // 不走文案表；只有"跟随系统"这一句是界面文案。
+  function renderLanguageOptions() {
+    if (!els.language) return;
+    var html = '<option value="auto">' + VL.esc(VL.t("voxlink.app.settings.lang_auto", "跟随系统")) + "</option>";
+    (VL.lang.available || []).forEach(function (code) {
+      html += '<option value="' + VL.esc(code) + '">' + VL.esc(VL.langName(code)) + "</option>";
+    });
+    els.language.innerHTML = html;
+    els.language.value = VL.lang.setting || "auto";
+    if (els.language.selectedIndex < 0) els.language.value = "auto";
+  }
+
   async function load() {
     try {
       var data = await VL.api("GetSettings");
@@ -58,9 +73,21 @@
       els.theme.value = VL.themes.current;
       // relayEnabled 缺省按模组的默认值 true（VoxLinkConfig.java:41）
       els.relay.checked = data.relayEnabled !== false;
+      if (data.language) VL.lang.setting = data.language;
+      if (Array.isArray(data.languages)) VL.lang.available = data.languages;
+      renderLanguageOptions();
     } catch (e) {
       els.version.textContent = "v" + FALLBACK_VERSION;
     }
+  }
+
+  // 改动即时保存；以后端返回值为准——非法代码会被后端静默忽略，界面不能显示自己传进去的那个。
+  async function changeLanguage() {
+    var picked = els.language.value;
+    try {
+      await VL.setLanguage(picked);
+    } catch (e) { /* 无后端：语言包取不到，界面继续显示中文，不打扰玩家 */ }
+    renderLanguageOptions();
   }
 
   // SaveSettings 保存主题与玩家中继开关（应用端不暴露服务器地址等参数）
@@ -72,7 +99,7 @@
         theme: VL.themes.current,
         relayEnabled: !!els.relay.checked
       }));
-      VL.toast("已保存", "success");
+      VL.toast(VL.t("voxlink.app.action.saved", "已保存"), "success");
     } catch (e) {
       if (e.code !== "NO_BACKEND") {
         els.error.textContent = VL.errText(e);
@@ -163,36 +190,40 @@
     var sub = [it.loader, it.gameVersion].filter(Boolean).join(" · ");
     return '<div class="field msi-item" data-orig="' + VL.esc(it.name) + '">' +
       '<div class="card-head">' +
-        '<span class="card-title">实例 ' + (i + 1) + "</span>" +
-        (isActive ? '<span class="pill pill-accent">正在使用</span>' : "") +
+        '<span class="card-title">' + VL.esc(VL.t("voxlink.app.ms.index", "实例 %s", i + 1)) + "</span>" +
+        (isActive ? '<span class="pill pill-accent">' + VL.esc(VL.t("voxlink.app.ms.in_use", "正在使用")) + "</span>" : "") +
         '<span class="card-count">' + VL.esc(sub) + "</span>" +
       "</div>" +
       '<div class="field-row">' +
         '<div class="field">' +
-          '<label class="field-label" for="' + idp + 'name">实例名</label>' +
+          '<label class="field-label" for="' + idp + 'name">' + VL.esc(VL.t("voxlink.app.ms.instance_name", "实例名")) + "</label>" +
           '<input type="text" class="input" id="' + idp + 'name" data-f="name" maxlength="24" ' +
           'autocomplete="off" value="' + VL.esc(it.name) + '">' +
         "</div>" +
         '<div class="field">' +
-          '<label class="field-label" for="' + idp + 'loader">加载器</label>' +
+          '<label class="field-label" for="' + idp + 'loader">' + VL.esc(VL.t("voxlink.app.ms.loader", "加载器")) + "</label>" +
           '<select class="select" id="' + idp + 'loader" data-f="loader">' + loaderOptions(it.loader) + "</select>" +
         "</div>" +
       "</div>" +
       '<div class="field">' +
-        '<label class="field-label" for="' + idp + 'dir">mods 目录</label>' +
+        '<label class="field-label" for="' + idp + 'dir">' + VL.esc(VL.t("voxlink.app.ms.mods_dir", "mods 目录")) + "</label>" +
         '<input type="text" class="input" id="' + idp + 'dir" data-f="dir" autocomplete="off" ' +
         'value="' + VL.esc(it.modsDir) + '">' +
-        '<button type="button" class="btn btn-ghost btn-sm" data-browse-dir title="从磁盘选目录">浏览</button>' +
+        '<button type="button" class="btn btn-ghost btn-sm" data-browse-dir title="' +
+        VL.esc(VL.t("voxlink.app.ms.browse_title", "从磁盘选目录")) + '">' +
+        VL.esc(VL.t("voxlink.app.modsync.browse", "浏览")) + "</button>" +
       "</div>" +
       '<div class="field-row">' +
         '<div class="field">' +
-          '<label class="field-label" for="' + idp + 'gv">MC 版本</label>' +
+          '<label class="field-label" for="' + idp + 'gv">' + VL.esc(VL.t("voxlink.app.ms.mc_version", "MC 版本")) + "</label>" +
           '<input type="text" class="input" id="' + idp + 'gv" data-f="gv" maxlength="16" ' +
           'autocomplete="off" value="' + VL.esc(it.gameVersion) + '">' +
         "</div>" +
         '<div class="field ms-actions">' +
-          '<button type="button" class="btn btn-ghost btn-sm" data-act="use"' + (isActive ? " disabled" : "") + ">设为当前</button>" +
-          '<button type="button" class="btn btn-danger btn-sm" data-act="del">删除</button>' +
+          '<button type="button" class="btn btn-ghost btn-sm" data-act="use"' + (isActive ? " disabled" : "") + ">" +
+          VL.esc(VL.t("voxlink.app.ms.use", "设为当前")) + "</button>" +
+          '<button type="button" class="btn btn-danger btn-sm" data-act="del">' +
+          VL.esc(VL.t("voxlink.app.create.delete", "删除")) + "</button>" +
         "</div>" +
       "</div>" +
     "</div>";
@@ -203,7 +234,11 @@
     var list = (msView && msView.instances) || [];
     var active = (msView && msView.activeInstance) || "";
     clearTimeout(armTimer);
-    if (els.count) els.count.textContent = list.length ? list.length + " 个实例" : "还没有实例";
+    if (els.count) {
+      els.count.textContent = list.length
+        ? VL.t("voxlink.app.settings.instance_count", "%s 个实例", list.length)
+        : VL.t("voxlink.app.settings.no_instance", "还没有实例");
+    }
     if (els.empty) els.empty.classList.toggle("hidden", list.length > 0);
     var html = "";
     list.forEach(function (it, i) { html += rowHtml(it, i, !!it.name && it.name === active); });
@@ -226,9 +261,9 @@
       var orig = row.getAttribute("data-orig") || "";
       var name = fieldValue(row, "name");
       var dir = fieldValue(row, "dir");
-      if (!name) error = error || "第 " + (i + 1) + " 个实例的名字空着了，填一个吧";
-      else if (used[name]) error = error || "「" + name + "」这个名字有两个实例在用，改一个再存";
-      else if (!dir) error = error || "「" + name + "」的 mods 目录空着，把完整路径贴进来";
+      if (!name) error = error || VL.t("voxlink.app.ms.name_empty", "第 %s 个实例的名字空着了，填一个吧", i + 1);
+      else if (used[name]) error = error || VL.t("voxlink.app.ms.dup_name", "「%s」这个名字有两个实例在用，改一个再存", name);
+      else if (!dir) error = error || VL.t("voxlink.app.ms.dir_empty", "「%s」的 mods 目录空着，把完整路径贴进来", name);
       if (name) used[name] = true;
       if (orig && name && orig !== name) renamed[orig] = name;
       instances.push({
@@ -282,7 +317,7 @@
     var data = collectRows();
     if (data.error) { showMsError(data.error); return; }
     writeMs({ instances: data.instances, activeInstance: data.activeInstance }).then(function (ok) {
-      if (ok) VL.toast("实例都存好啦 qwq", "success");
+      if (ok) VL.toast(VL.t("voxlink.app.ms.saved_all", "实例都存好啦 qwq"), "success");
     });
   }
 
@@ -293,7 +328,7 @@
     if (data.error) { showMsError(data.error); return; }
     var name = fieldValue(row, "name");
     writeMs({ instances: data.instances, activeInstance: name }).then(function (ok) {
-      if (ok) VL.toast("现在帮你同步 Mod 的是「" + name + "」", "success");
+      if (ok) VL.toast(VL.t("voxlink.app.ms.now_sync", "现在帮你同步 Mod 的是「%s」", name), "success");
     });
   }
 
@@ -301,7 +336,7 @@
     clearTimeout(armTimer);
     if (!btn) return;
     btn.classList.remove("armed");
-    btn.textContent = "删除";
+    btn.textContent = VL.t("voxlink.app.create.delete", "删除");
   }
 
   // 删除要点两次：第一次变成「真删？再点一次」，几秒不点就缩回去
@@ -310,7 +345,7 @@
     if (!btn.classList.contains("armed")) {
       VL.$$(".msi-item .btn-danger.armed", els.list).forEach(disarm);
       btn.classList.add("armed");
-      btn.textContent = "真删？再点一次";
+      btn.textContent = VL.t("voxlink.app.ms.confirm_del", "真删？再点一次");
       armTimer = setTimeout(function () { disarm(btn); }, 5000);
       return;
     }
@@ -328,10 +363,13 @@
     if (wasActive) patch.activeInstance = rest.length ? rest[0].name : "";
     writeMs(patch).then(function (ok) {
       if (!ok) return;
-      if (!wasActive) { VL.toast("已删除实例「" + name + "」", "success"); return; }
+      if (!wasActive) {
+        VL.toast(VL.t("voxlink.app.ms.deleted", "已删除实例「%s」", name), "success");
+        return;
+      }
       VL.toast(rest.length
-        ? "已删除正在使用的「" + name + "」，改用「" + rest[0].name + "」啦"
-        : "已删除「" + name + "」，实例清空了，创建房间时选「不同步模组」就行", "success");
+        ? VL.t("voxlink.app.ms.deleted_active", "已删除正在使用的「%s」，改用「%s」啦", name, rest[0].name)
+        : VL.t("voxlink.app.ms.deleted_last", "已删除「%s」，实例清空了，创建房间时选「不同步模组」就行", name), "success");
     });
   }
 
@@ -349,10 +387,10 @@
     if (data.error) { showMsError(data.error); return; }
     var name = (els.msName.value || "").trim();
     var dir = (els.msDir.value || "").trim();
-    if (!name) { showMsError("给新实例起个名字吧"); return; }
-    if (!dir) { showMsError("新实例要填 mods 目录，把完整路径贴进来"); return; }
+    if (!name) { showMsError(VL.t("voxlink.app.ms.need_name_new", "给新实例起个名字吧")); return; }
+    if (!dir) { showMsError(VL.t("voxlink.app.ms.need_dir_new", "新实例要填 mods 目录，把完整路径贴进来")); return; }
     if (data.instances.some(function (it) { return it.name === name; })) {
-      showMsError("已经有叫「" + name + "」的实例了，换个名字吧");
+      showMsError(VL.t("voxlink.app.ms.dup_name_new", "已经有叫「%s」的实例了，换个名字吧", name));
       return;
     }
     var list = data.instances.concat([{
@@ -368,7 +406,7 @@
       els.msDir.value = "";
       els.msGv.value = "";
       els.msLoader.value = "fabric";
-      VL.toast("已保存实例「" + name + "」，创建房间时就能在下拉里选它", "success");
+      VL.toast(VL.t("voxlink.app.ms.saved_new", "已保存实例「%s」，创建房间时就能在下拉里选它", name), "success");
     });
   }
 
@@ -397,10 +435,14 @@
     cacheEls();
     els.save.addEventListener("click", save);
     els.theme.addEventListener("change", changeTheme);
+    if (els.language) els.language.addEventListener("change", changeLanguage);
     els.relay.addEventListener("change", changeRelay);
     if (els.msJoin) els.msJoin.addEventListener("change", changeModSyncJoin);
     bindInstances();
+    renderLanguageOptions();
     load().then(loadModSync);
+    // 实例清单里的每一条文案都是 JS 拼出来的，换语言时得重画一遍（设置页里只有这一处）
+    VL.onLangChange(function () { renderInstances(); renderLanguageOptions(); });
     // 设置页每次被打开时重新取一遍：建房页也会写同一份 modsync.json，只看一次会显示旧值
     // （实例清单跟那个开关在同一份文件里，一次 Get 顺便都刷回来）
     VL.refreshSettings = loadModSync;

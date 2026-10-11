@@ -13,16 +13,21 @@
   var newFiles = [];
   var replyFiles = [];
   var deleteArmed = false;
+  // 换语言时要拿"上一次渲染用的数据"重画一遍，而不是重新问后端：
+  // TicketList / TicketDetail 都会顺带把未读状态改成已读，重发等于偷偷做了玩家没做的事。
+  var lastList = null;
+  var lastDetail = null;
 
+  // 每条 = [语言键, 中文原文]：错误码到文案的映射，文案本身要能跟着语言走
   var ERR_TEXT = {
-    TICKET_FORBIDDEN: "这台电脑没有这条工单的查询凭证（换过设备或重装过），所以打不开它",
-    TICKET_NOT_FOUND: "找不到这条工单",
-    TICKET_EMPTY: "写点什么，或者附上日志吧",
-    INVALID_FILE: "附件读不到，重新选一次试试"
+    TICKET_FORBIDDEN: ["voxlink.app.ticket.err_forbidden", "这台电脑没有这条工单的查询凭证（换过设备或重装过），所以打不开它"],
+    TICKET_NOT_FOUND: ["voxlink.app.ticket.err_not_found", "找不到这条工单"],
+    TICKET_EMPTY: ["voxlink.app.ticket.err_empty", "写点什么，或者附上日志吧"],
+    INVALID_FILE: ["voxlink.app.ticket.err_file", "附件读不到，重新选一次试试"]
   };
 
   function errText(e) {
-    if (e && e.code && ERR_TEXT[e.code]) return ERR_TEXT[e.code];
+    if (e && e.code && ERR_TEXT[e.code]) return VL.t(ERR_TEXT[e.code][0], ERR_TEXT[e.code][1]);
     return VL.errText(e);
   }
 
@@ -50,18 +55,21 @@
     if (!list || !list.length) return "";
     var parts = [];
     for (var i = 0; i < list.length; i++) {
-      parts.push(VL.esc(list[i].name || "附件") + " · " + fmtSize(list[i].size));
+      parts.push(VL.esc(list[i].name || VL.t("voxlink.app.ticket.attachment", "附件")) + " · " + fmtSize(list[i].size));
     }
-    return '<div class="ticket-msg-meta">附件：' + parts.join("　") + "</div>";
+    return '<div class="ticket-msg-meta">' + VL.esc(VL.t("voxlink.app.ticket.attach_label", "附件：")) +
+      parts.join("　") + "</div>";
   }
 
   function msgRow(m, isPlayer) {
-    var who = isPlayer ? "我" : "官方";
+    var who = isPlayer
+      ? VL.t("voxlink.app.ticket.me", "我")
+      : VL.t("voxlink.app.ticket.official", "官方");
     var when = m.timeMs ? " · " + VL.relTime(m.timeMs) : "";
     // 自己发的那条才给撤回入口（撤回是删数据，点了要立刻锁住按钮）
     var act = isPlayer && m.id
       ? '<div class="ticket-msg-acts"><button type="button" class="ticket-msg-retract" data-mid="' +
-        VL.esc(m.id) + '">撤回</button></div>'
+        VL.esc(m.id) + '">' + VL.esc(VL.t("voxlink.app.ticket.retract", "撤回")) + "</button></div>"
       : "";
     return '<div class="ticket-msg' + (isPlayer ? "" : " ticket-msg-admin") + '">' +
       '<div class="ticket-msg-meta">' + who + when + "</div>" +
@@ -80,8 +88,11 @@
     els.empty.classList.add("hidden");
     els.list.innerHTML = tickets.map(function (t) {
       var badge = t.hasUnread
-        ? '<span class="pill pill-warning">有新回复</span>'
-        : (t.replyCount ? '<span class="pill pill-accent">' + t.replyCount + " 条回复</span>" : "");
+        ? '<span class="pill pill-warning">' + VL.esc(VL.t("voxlink.app.ticket.has_reply", "有新回复")) + "</span>"
+        : (t.replyCount
+          ? '<span class="pill pill-accent">' +
+            VL.esc(VL.t("voxlink.app.ticket.reply_count", "%s 条回复", t.replyCount)) + "</span>"
+          : "");
       return '<div class="card ticket-item" data-tid="' + VL.esc(t.id) + '">' +
         '<div class="ticket-item-main">' +
         '<div class="ticket-item-id">' + VL.esc(t.id) + "</div>" +
@@ -94,7 +105,8 @@
     box.innerHTML = files.map(function (p, i) {
       var name = String(p).split(/[\\/]/).pop();
       return '<span class="chip">' + VL.esc(name) +
-        ' <button type="button" data-rm="' + i + '" title="移除">&times;</button></span>';
+        ' <button type="button" data-rm="' + i + '" title="' +
+        VL.esc(VL.t("voxlink.app.ticket.remove", "移除")) + '">&times;</button></span>';
     }).join("");
     box.onclick = function (ev) {
       var btn = ev.target.closest("[data-rm]");
@@ -106,9 +118,11 @@
 
   async function refresh(poll) {
     try {
-      renderList(await VL.api(poll ? "TicketPoll" : "TicketList"));
+      var data = await VL.api(poll ? "TicketPoll" : "TicketList");
+      lastList = data;
+      renderList(data);
     } catch (e) {
-      if (e.code !== "NO_BACKEND") renderList(null);
+      if (e.code !== "NO_BACKEND") { lastList = null; renderList(null); }
     }
   }
 
@@ -119,12 +133,15 @@
     setErr(els.replyError, "");
     disarmDelete();
     show("detail");
-    els.thread.innerHTML = '<div class="ticket-msg-meta">加载中…</div>';
+    els.thread.innerHTML = '<div class="ticket-msg-meta">' +
+      VL.esc(VL.t("voxlink.ticket.loading", "正在加载工单…")) + "</div>";
     try {
       var d = await VL.api("TicketDetail", id);
-      renderDetail(d || {});
+      lastDetail = d || {};
+      renderDetail(lastDetail);
       refresh(false);
     } catch (e) {
+      lastDetail = null;
       els.thread.innerHTML = '<div class="ticket-msg"><div class="ticket-msg-text">' +
         VL.esc(errText(e)) + "</div></div>";
     }
@@ -132,7 +149,8 @@
 
   function renderDetail(d) {
     var rows = [];
-    rows.push('<div class="ticket-msg"><div class="ticket-msg-meta">我 · ' +
+    rows.push('<div class="ticket-msg"><div class="ticket-msg-meta">' +
+      VL.esc(VL.t("voxlink.app.ticket.me", "我")) + " · " +
       VL.relTime((d.time || 0) * 1000) + "</div>" +
       '<div class="ticket-msg-text">' + VL.esc(d.description || "") + "</div>" +
       attLine(d.attachments) + "</div>");
@@ -146,7 +164,8 @@
       }, msgs[i].from !== "admin"));
     }
     if (!msgs.length) {
-      rows.push('<div class="ticket-msg-meta">还没有回复，官方回来看这里 (￣▽￣)ゞ</div>');
+      rows.push('<div class="ticket-msg-meta">' +
+        VL.esc(VL.t("voxlink.app.ticket.no_reply", "还没有回复，官方回来看这里 (￣▽￣)ゞ")) + "</div>");
     }
     els.thread.innerHTML = rows.join("");
   }
@@ -154,7 +173,7 @@
   function disarmDelete() {
     deleteArmed = false;
     if (els.del) {
-      els.del.textContent = "删除工单";
+      els.del.textContent = VL.t("voxlink.ticket.delete", "删除工单");
       els.del.classList.remove("armed");
     }
   }
@@ -214,7 +233,7 @@
     els.submit.addEventListener("click", async function () {
       var text = (els.desc.value || "").trim();
       if (!text && !newFiles.length) {
-        setErr(els.newError, ERR_TEXT.TICKET_EMPTY);
+        setErr(els.newError, errText({ code: "TICKET_EMPTY" }));
         return;
       }
       els.submit.disabled = true;
@@ -224,7 +243,7 @@
         newFiles = [];
         renderFiles(els.newFiles, newFiles, function (f) { newFiles = f; });
         els.desc.value = "";
-        VL.toast("工单已提交：" + ((res && res.id) || ""), "success");
+        VL.toast(VL.t("voxlink.app.ticket.submitted", "工单已提交：%s", (res && res.id) || ""), "success");
         if (res && res.id) openDetail(res.id); else show("list");
       } catch (e) {
         setErr(els.newError, errText(e));
@@ -244,12 +263,12 @@
     els.thread.addEventListener("click", async function (ev) {
       var btn = ev.target.closest(".ticket-msg-retract");
       if (!btn || !current) return;
-      if (!window.confirm("撤回这条追问？撤回后会从会话中移除。")) return;
+      if (!window.confirm(VL.t("voxlink.app.ticket.confirm_retract", "撤回这条追问？撤回后会从会话中移除。"))) return;
       var mid = btn.getAttribute("data-mid");
       btn.disabled = true;
       try {
         await VL.api("TicketRetract", JSON.stringify({ id: current, msg: mid }));
-        VL.toast("已撤回", "success");
+        VL.toast(VL.t("voxlink.ticket.retracted", "已撤回"), "success");
         openDetail(current);
       } catch (e) {
         btn.disabled = false;
@@ -264,7 +283,7 @@
       if (!current) return;
       var text = (els.replyText.value || "").trim();
       if (!text && !replyFiles.length) {
-        setErr(els.replyError, ERR_TEXT.TICKET_EMPTY);
+        setErr(els.replyError, errText({ code: "TICKET_EMPTY" }));
         return;
       }
       els.send.disabled = true;
@@ -274,7 +293,7 @@
         replyFiles = [];
         renderFiles(els.replyFiles, replyFiles, function (f) { replyFiles = f; });
         els.replyText.value = "";
-        VL.toast("追问已发送", "success");
+        VL.toast(VL.t("voxlink.app.ticket.reply_sent", "追问已发送"), "success");
         openDetail(current);
       } catch (e) {
         setErr(els.replyError, errText(e));
@@ -287,14 +306,14 @@
       if (!current) return;
       if (!deleteArmed) {
         deleteArmed = true;
-        els.del.textContent = "再点一次确认删除";
+        els.del.textContent = VL.t("voxlink.app.ticket.confirm_delete", "再点一次确认删除");
         els.del.classList.add("armed");
         return;
       }
       els.del.disabled = true;
       try {
         await VL.api("TicketDelete", current);
-        VL.toast("已删除", "success");
+        VL.toast(VL.t("voxlink.app.ticket.deleted", "已删除"), "success");
         disarmDelete();
         show("list");
         refresh(false);
@@ -308,4 +327,17 @@
 
   // 启动时静默轮询一次，把未读数点亮到侧栏角标
   VL.ticketBoot = function () { refresh(true); };
+
+  // 换语言：拿上一次的数据重画当前这一屏（列表 / 详情），撤回确认那类瞬时状态不重复触发
+  VL.onLangChange(function () {
+    if (deleteArmed && els.del) els.del.textContent = VL.t("voxlink.ticket.delete", "删除工单");
+    deleteArmed = false;
+    var detail = VL.$("#ticket-view-detail");
+    if (lastDetail && detail && !detail.classList.contains("hidden")) {
+      renderDetail(lastDetail);
+      return;
+    }
+    // 没成功取过列表就不重画：renderList(null) 会顺手把未读角标清零，那是玩家没做的操作
+    if (lastList) renderList(lastList);
+  });
 })(window.VL);

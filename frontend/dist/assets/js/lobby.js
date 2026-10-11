@@ -52,23 +52,42 @@
     }
     var cats = Object.keys(state.categories);
     // 大厅筛选下拉
-    var html = '<option value="">全部分类</option>';
+    var allCats = VL.t("voxlink.app.lobby.category_all", "全部分类");
+    var html = '<option value="">' + allCats + "</option>";
     cats.forEach(function (key) {
       html += '<option value="' + VL.esc(key) + '">' + VL.esc(state.categories[key] || key) + "</option>";
     });
     els.category.innerHTML = html;
     // 创建页 / 房间设置的下拉（若有）；创建页额外带“自定义”选项
-    var opts = '<option value="">未分类</option>' + html.replace('<option value="">全部分类</option>', "");
+    var opts = '<option value="">' + VL.t("voxlink.app.category.none", "未分类") + "</option>" +
+      html.replace('<option value="">' + allCats + "</option>", "");
     var createEl = VL.$("#create-category");
-    if (createEl) createEl.innerHTML = opts + '<option value="__custom__">自定义…</option>';
+    if (createEl) createEl.innerHTML = opts + '<option value="__custom__">' +
+      VL.t("voxlink.app.category.custom_more", "自定义…") + "</option>";
     var hsEl = VL.$("#hs-category");
     if (hsEl) hsEl.innerHTML = opts;
     if (VL.onCategoriesLoaded) VL.onCategoriesLoaded();
   }
 
   function catName(key) {
-    if (!key) return "未分类";
+    if (!key) return VL.t("voxlink.app.category.none", "未分类");
     return state.categories[key] || key;
+  }
+
+  // 只改"应用端自己写的那几个选项"的文字（全部分类 / 未分类 / 自定义…）。
+  // 换语言时不能靠重建 innerHTML 来刷新：那会把玩家正选着的筛选条件一起抹掉。
+  function setOptionLabel(sel, value, key, cn) {
+    if (!sel) return;
+    var opt = sel.querySelector('option[value="' + value + '"]');
+    if (opt) opt.textContent = VL.t(key, cn);
+  }
+
+  function refreshOptionLabels() {
+    setOptionLabel(els.category, "", "voxlink.app.lobby.category_all", "全部分类");
+    var createEl = VL.$("#create-category");
+    setOptionLabel(createEl, "", "voxlink.app.category.none", "未分类");
+    setOptionLabel(createEl, "__custom__", "voxlink.app.category.custom_more", "自定义…");
+    setOptionLabel(VL.$("#hs-category"), "", "voxlink.app.category.none", "未分类");
   }
 
   /* ---------------- 房间列表 ---------------- */
@@ -97,25 +116,38 @@
     // 来源标签：CLI `room create --client-tag` 传了什么就显示什么（≤10 字，可为中文）。
     // 没传标签时回落原口径：应用端房显示"应用端"，模组房显示它的 clientType。
     if (r.clientTag) {
-      tags += '<span class="pill pill-app" title="该房间的创建端">' + VL.esc(r.clientTag) + "</span>";
+      tags += '<span class="pill pill-app" title="' + VL.esc(VL.t("voxlink.app.room.tag_creator_title", "该房间的创建端")) + '">' +
+        VL.esc(r.clientTag) + "</span>";
     } else if (r.clientType === "app") {
-      tags += '<span class="pill pill-app" title="该房间由 VoxLink 应用端创建">应用端</span>';
+      tags += '<span class="pill pill-app" title="' +
+        VL.esc(VL.t("voxlink.app.room.tag_app_title", "该房间由 VoxLink 应用端创建")) + '">' +
+        VL.esc(VL.t("voxlink.app.room.tag_app", "应用端")) + "</span>";
     } else if (r.clientType) {
       tags += '<span class="pill">' + VL.esc(r.clientType) + "</span>";
     }
-    if (r.protocolVersion) tags += '<span class="pill">协议 v' + VL.esc(r.protocolVersion) + "</span>";
+    if (r.protocolVersion) {
+      tags += '<span class="pill">' + VL.esc(VL.t("voxlink.app.room.protocol", "协议 v%s", r.protocolVersion)) + "</span>";
+    }
     // 互通：Happy Link 来源徽标（模组 RoomBrowserScreenBase.java:697-703，
     // 品牌名 "Happy Link" 全语言不翻译，判据是 r.source === "happylink" 精确相等）
-    if (r.source === "happylink") tags += '<span class="pill pill-accent" title="Happy Link 互通房间">Happy Link</span>';
+    if (r.source === "happylink") {
+      tags += '<span class="pill pill-accent" title="' +
+        VL.esc(VL.t("voxlink.app.room.hl_title", "Happy Link 互通房间")) + '">Happy Link</span>';
+    }
 
     return (
       '<div class="card card-hoverable room-card">' +
       '  <div class="room-card-top">' +
-      '    <div class="room-name" title="' + VL.esc(r.name || "") + '">' + VL.esc(r.name || "未命名房间") +
-      (r.hasPassword ? '<span class="ico" title="需要密码">' + VL.iconSvg("lock") + "</span>" : "") +
-      (r.nameApproved ? '<span class="pill pill-success" title="房名已审核">已审核</span>' : "") +
+      '    <div class="room-name" title="' + VL.esc(r.name || "") + '">' +
+      VL.esc(r.name || VL.t("voxlink.app.room.unnamed", "未命名房间")) +
+      (r.hasPassword ? '<span class="ico" title="' + VL.esc(VL.t("voxlink.app.join.need_password", "需要密码")) +
+        '">' + VL.iconSvg("lock") + "</span>" : "") +
+      (r.nameApproved ? '<span class="pill pill-success" title="' +
+        VL.esc(VL.t("voxlink.app.room.name_approved_title", "房名已审核")) + '">' +
+        VL.esc(VL.t("voxlink.app.room.name_approved", "已审核")) + "</span>" : "") +
       "    </div>" +
-      '    <button class="code-chip" data-code="' + VL.esc(r.code || "") + '" title="点击复制房间代码">' +
+      '    <button class="code-chip" data-code="' + VL.esc(r.code || "") + '" title="' +
+      VL.esc(VL.t("voxlink.app.room.code_copy_title", "点击复制房间代码")) + '">' +
       VL.esc(r.code || "------") + '<span class="ico">' + VL.iconSvg("copy") + "</span></button>" +
       "  </div>" +
       '  <div class="room-tags">' + tags + "</div>" +
@@ -124,7 +156,8 @@
       '      <span class="room-players-mini"><span class="ico">' + VL.iconSvg("users") + "</span>" + VL.esc(players) + "</span>" +
       '      <span class="room-region">' + VL.esc(regionIsp || "") + "</span>" +
       "    </div>" +
-      '    <button class="btn btn-primary btn-sm" data-join="' + VL.esc(r.code || "") + '" data-has-pw="' + (r.hasPassword ? "1" : "0") + '">加入</button>' +
+      '    <button class="btn btn-primary btn-sm" data-join="' + VL.esc(r.code || "") + '" data-has-pw="' +
+      (r.hasPassword ? "1" : "0") + '">' + VL.esc(VL.t("voxlink.app.action.join", "加入")) + "</button>" +
       "  </div>" +
       "</div>"
     );
@@ -178,8 +211,8 @@
     var sel = document.createElement("select");
     sel.className = "select";
     sel.id = "lobby-version";
-    sel.title = "按 Minecraft 版本筛选（只影响当前这一页显示，不改服务端查询）";
-    sel.innerHTML = '<option value="">全部版本</option>';
+    sel.title = VL.t("voxlink.app.lobby.version_title", "按 Minecraft 版本筛选（只影响当前这一页显示，不改服务端查询）");
+    sel.innerHTML = '<option value="">' + VL.esc(VL.t("voxlink.app.lobby.version_all", "全部版本")) + "</option>";
     els.category.parentNode.insertBefore(sel, els.category.nextSibling);
     els.version = sel;
   }
@@ -197,11 +230,14 @@
       seen[value] = true;
       opts.push({ value: value, label: versionLabelOf(r.gameVersion) });
     });
-    var html = '<option value="">全部版本</option>';
+    var html = '<option value="">' + VL.esc(VL.t("voxlink.app.lobby.version_all", "全部版本")) + "</option>";
     opts.forEach(function (o) {
       html += '<option value="' + VL.esc(o.value) + '">' + VL.esc(o.label) + "</option>";
     });
-    if (hasNone) html += '<option value="' + VERSION_NONE + '">未指定</option>';
+    if (hasNone) {
+      html += '<option value="' + VERSION_NONE + '">' +
+        VL.esc(VL.t("voxlink.app.lobby.version_none", "未指定")) + "</option>";
+    }
     var exists = state.version === "" ||
       (state.version === VERSION_NONE ? hasNone : !!seen[state.version]);
     if (!exists) state.version = "";
@@ -296,10 +332,10 @@
       if (data && data.ip) parts.push("IPv4: " + data.ip);
       if (data && data.ipv6) parts.push("IPv6: " + data.ipv6);
       els.ip.textContent = parts.length
-        ? "你的公网 IP　" + parts.join("　")
-        : "暂时拿不到你的公网 IP qwq";
+        ? VL.t("voxlink.app.lobby.my_ip", "你的公网 IP　%s", parts.join("　"))
+        : VL.t("voxlink.app.lobby.ip_failed", "暂时拿不到你的公网 IP qwq");
     } catch (e) {
-      els.ip.textContent = "暂时拿不到你的公网 IP qwq";
+      els.ip.textContent = VL.t("voxlink.app.lobby.ip_failed", "暂时拿不到你的公网 IP qwq");
     }
   }
 
@@ -313,13 +349,13 @@
     VL.api("JoinRoom", JSON.stringify({ code: code, password: password || "" }))
       .then(function (data) {
         closeJoinPops();
-        VL.toast("加入成功，欢迎 awa", "success");
+        VL.toast(VL.t("voxlink.app.join.success", "加入成功，欢迎 awa"), "success");
         // 走统一入口：跳房间页，房客连接卡自动开始 P2P 打洞阶段
         if (VL.onJoined) VL.onJoined(data);
       })
       .catch(function (e) {
         if (e.code === "ROOM_NOT_FOUND_OR_WRONG_PASSWORD") {
-          VL.toast("找不到这个房间 qwq 或密码不对", "error");
+          VL.toast(VL.t("voxlink.app.error.room_not_found_or_pw", "找不到这个房间 qwq 或密码不对"), "error");
         } else if (e.code !== "NO_BACKEND") {
           VL.toast(VL.errText(e), "error");
         }
@@ -332,8 +368,10 @@
     var pop = document.createElement("div");
     pop.className = "join-pop";
     pop.innerHTML =
-      '<input type="password" class="input" placeholder="这个房间设置了密码" autocomplete="off">' +
-      '<button class="btn btn-primary btn-sm">确认加入</button>';
+      '<input type="password" class="input" placeholder="' +
+      VL.esc(VL.t("voxlink.app.join.pw_ph", "这个房间设置了密码")) + '" autocomplete="off">' +
+      '<button class="btn btn-primary btn-sm">' +
+      VL.esc(VL.t("voxlink.app.join.confirm", "确认加入")) + "</button>";
     card.appendChild(pop);
     var input = pop.querySelector("input");
     var btn = pop.querySelector("button");
@@ -427,6 +465,15 @@
     loadCategories();
     fetchRooms();
     loadIp();
+
+    // 房间卡片、版本下拉和公网 IP 那行都是 JS 拼出来的文本：换语言后重画一次。
+    // 不重发 ListRooms（卡片内容没变，重发会打断玩家正在看的分页位置），IP 那行本来就会被后端缓存。
+    VL.onLangChange(function () {
+      refreshOptionLabels();
+      renderVersionOptions();
+      render();
+      loadIp();
+    });
   };
 
   // 供 app.js 在回大厅时刷新列表

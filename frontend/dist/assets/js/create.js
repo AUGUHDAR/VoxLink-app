@@ -70,7 +70,7 @@
     if (!els.msInstance) return;
     var list = msInstances();
     var active = (msView && msView.activeInstance) || "";
-    var html = '<option value="">不同步模组</option>';
+    var html = '<option value="">' + VL.esc(VL.t("voxlink.app.create.ms_none", "不同步模组")) + "</option>";
     list.forEach(function (it) {
       html += '<option value="' + VL.esc(it.name) + '">' + VL.esc(it.name) +
         (it.loader || it.gameVersion ? "（" + VL.esc([it.loader, it.gameVersion].filter(Boolean).join(" · ")) + "）" : "") +
@@ -135,14 +135,14 @@
       if (!name) return;
       var rest = msInstances().filter(function (it) { return it.name !== name; });
       saveModSync({ instances: rest, activeInstance: "" }).then(function () {
-        VL.toast("已删除实例「" + name + "」", "success");
+        VL.toast(VL.t("voxlink.app.ms.deleted", "已删除实例「%s」", name), "success");
       });
     });
     els.msSaveNew.addEventListener("click", function () {
       var name = els.msName.value.trim();
       var dir = els.msDir.value.trim();
-      if (!name) { VL.toast("给实例起个名字", "error"); return; }
-      if (!dir) { VL.toast("要填 mods 目录", "error"); return; }
+      if (!name) { VL.toast(VL.t("voxlink.app.ms.need_name", "给实例起个名字"), "error"); return; }
+      if (!dir) { VL.toast(VL.t("voxlink.app.ms.need_dir", "要填 mods 目录"), "error"); return; }
       var list = msInstances().filter(function (it) { return it.name !== name; });
       list.push({
         name: name,
@@ -152,7 +152,7 @@
       });
       saveModSync({ instances: list, activeInstance: name }).then(function () {
         showInstanceForm(false);
-        VL.toast("已保存实例「" + name + "」", "success");
+        VL.toast(VL.t("voxlink.app.ms.saved", "已保存实例「%s」", name), "success");
       });
     });
   }
@@ -219,21 +219,32 @@
       els.portSelect.innerHTML = "";
     }
 
+    renderPortHint();
+  }
+
+  // 提示文字单独成一个函数：换语言时只需要重说这句话，
+  // 不能顺带重跑 renderPortState —— 它会把检测到的端口回填进输入框，
+  // 玩家手改过的端口会被一次语言切换悄悄换掉。
+  function portHintText() {
     if (!detectedPorts.length) {
-      setPortHint("neutral", "未检测到正在运行的 MC，请手动输入端口");
-    } else if (detectedPorts.length === 1) {
-      setPortHint("ok", "已填入检测到的 MC 端口 " + detectedPorts[0].port + "，不对请手动改");
-    } else {
-      setPortHint("ok", "检测到 " + detectedPorts.length + " 个 MC 端口，已选用第一个，可在旁边下拉里换");
+      return VL.t("voxlink.app.create.port_none", "未检测到正在运行的 MC，请手动输入端口");
     }
+    if (detectedPorts.length === 1) {
+      return VL.t("voxlink.app.create.port_one", "已填入检测到的 MC 端口 %s，不对请手动改", detectedPorts[0].port);
+    }
+    return VL.t("voxlink.app.create.port_many", "检测到 %s 个 MC 端口，已选用第一个，可在旁边下拉里换", detectedPorts.length);
+  }
+
+  function renderPortHint() {
+    setPortHint(detectedPorts.length ? "ok" : "neutral", portHintText());
   }
 
   /* ---------------- 端口自动检测 ---------------- */
   async function detectPorts() {
     els.portDetect.disabled = true;
     var label = els.portDetect.textContent;
-    els.portDetect.textContent = "检测中…";
-    if (els.portHint) setPortHint("neutral", "正在检测本地 MC 端口…");
+    els.portDetect.textContent = VL.t("voxlink.app.create.detecting", "检测中…");
+    if (els.portHint) setPortHint("neutral", VL.t("voxlink.app.create.detecting_hint", "正在检测本地 MC 端口…"));
     try {
       var data = await VL.api("DetectMcPorts");
       var ports = (data && data.ports) || [];
@@ -243,9 +254,9 @@
     } catch (e) {
       detectedPorts = [];
       if (e.code !== "NO_BACKEND") {
-        setPortHint("neutral", "检测失败：" + VL.errText(e));
+        setPortHint("neutral", VL.t("voxlink.app.create.detect_failed", "检测失败：%s", VL.errText(e)));
       } else {
-        setPortHint("neutral", "未检测到正在运行的 MC，请手动输入端口");
+        setPortHint("neutral", VL.t("voxlink.app.create.port_none", "未检测到正在运行的 MC，请手动输入端口"));
       }
     }
     renderPortState();
@@ -289,21 +300,21 @@ function resolveLoader() {
 
     var category = resolveCategory();
     if (els.category.value === CUSTOM && !category) {
-      showError("选了自定义分类，就填一个分类名称吧");
+      showError(VL.t("voxlink.app.create.need_custom_category", "选了自定义分类，就填一个分类名称吧"));
       els.categoryCustom.focus();
       return;
     }
 
     var hostPort = resolveHostPort();
     if (!isFinite(hostPort)) {
-      showError("请填写本地 MC 端口（1024 - 65535 的整数），可点右侧“重新检测”");
+      showError(VL.t("voxlink.app.create.need_port", "请填写本地 MC 端口（1024 - 65535 的整数），可点右侧“重新检测”"));
       els.port.focus();
       return;
     }
 
     var gameVersion = resolveGameVersion();
     if (!gameVersion) {
-      showError("请填写游戏版本，例如 1.21.1");
+      showError(VL.t("voxlink.app.create.need_version", "请填写游戏版本，例如 1.21.1"));
       els.version.focus();
       return;
     }
@@ -321,13 +332,13 @@ function resolveLoader() {
     setBusy(true);
     try {
       var data = await VL.api("CreateRoom", JSON.stringify(req));
-      VL.toast("房间创建成功 :D", "success");
+      VL.toast(VL.t("voxlink.create_room.success", "房间创建成功！ :D"), "success");
       if (VL.onHosted) VL.onHosted(data);
     } catch (e) {
       // PORT_NOT_LISTENING：服务端拒绝建房的原因是本地端口没人监听，
       // 把 message 红字直接显示在端口框下方，其他错误走顶部 form-error。
       if (e.code === "PORT_NOT_LISTENING") {
-        showPortError(e.message || "端口没有服务在监听");
+        showPortError(e.message || VL.t("voxlink.app.create.port_not_listening", "端口没有服务在监听"));
         els.port.focus();
       } else if (e.code !== "NO_BACKEND") {
         showError(VL.errText(e));
@@ -339,7 +350,11 @@ function resolveLoader() {
   function setBusy(b) {
     els.btn.disabled = b;
     var label = els.btn.querySelector("span:last-child");
-    if (label) label.textContent = b ? "正在连接信令服务器..." : "创建房间";
+    if (label) {
+      label.textContent = b
+        ? VL.t("voxlink.create_flow.phase_registering", "正在连接信令服务器...")
+        : VL.t("voxlink.create_room", "创建房间");
+    }
   }
 
   VL.initCreate = function () {
@@ -389,6 +404,14 @@ function resolveLoader() {
     syncCategoryCustom();
     renderPortState();
     loadModSync();
+
+    // 端口提示那几行和实例下拉都是拼出来的：换语言后按现有数据重说一遍，
+    // 不重发 DetectMcPorts，也不碰玩家已经填过的端口
+    VL.onLangChange(function () {
+      renderInstances();
+      renderPortHint();
+      setBusy(!!els.btn.disabled);
+    });
   };
 
   // 进入创建页时被 app.js 调用：触发自动检测 + 刷新模组同步设置
@@ -414,7 +437,7 @@ function resolveLoader() {
     }
     if (els.portHint) {
       els.portHint.classList.remove("form-hint-ok", "form-hint-neutral");
-      els.portHint.textContent = "进入此页后会自动检测本机 MC 端口…";
+      els.portHint.textContent = VL.t("voxlink.app.create.port_autohint", "进入此页后会自动检测本机 MC 端口…");
     }
     clearPortError();
     els.visible.checked = true;

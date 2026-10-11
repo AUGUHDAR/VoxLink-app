@@ -89,7 +89,7 @@
     try {
       var data = await VL.api("RoomInfo", code);
       probedHasPassword = !!(data && data.hasPassword);
-      els.previewName.textContent = (data && data.name) || "未命名房间";
+      els.previewName.textContent = (data && data.name) || VL.t("voxlink.app.room.unnamed", "未命名房间");
       els.previewLock.hidden = !probedHasPassword;
       els.preview.classList.remove("hidden");
       els.pwField.classList.toggle("hidden", !probedHasPassword);
@@ -100,7 +100,7 @@
       els.preview.classList.add("hidden");
       els.pwField.classList.add("hidden");
       if (e.code === "ROOM_NOT_FOUND_OR_WRONG_PASSWORD" || e.code === "ROOM_NOT_FOUND") {
-        showError("找不到这个房间 qwq 检查一下代码？");
+        showError(VL.t("voxlink.join_room.error.not_found", "找不到这个房间，检查一下代码？ qwq"));
       } else if (e.code !== "NO_BACKEND") {
         showError(VL.errText(e));
       }
@@ -114,7 +114,9 @@
     clearError();
     var code = getCode();
     if (!isFull()) {
-      showError(code.slice(0, 2) === "HL" ? "互通房间代码是 7 位（HL + 5 位）" : "要先输入完整的 6 位房间代码哦");
+      showError(code.slice(0, 2) === "HL"
+        ? VL.t("voxlink.app.join.fed_len", "互通房间代码是 7 位（HL + 5 位）")
+        : VL.t("voxlink.app.join.vox_len", "要先输入完整的 6 位房间代码哦"));
       var focusIdx = els.inputs.map(function (i) { return i.value ? 0 : 1; }).indexOf(1);
       els.inputs[Math.max(0, focusIdx)].focus();
       return;
@@ -123,17 +125,17 @@
     setBusy(true);
     try {
       var data = await VL.api("JoinRoom", JSON.stringify({ code: code, password: password }));
-      VL.toast("加入成功，欢迎 awa", "success");
+      VL.toast(VL.t("voxlink.app.join.success", "加入成功，欢迎 awa"), "success");
       if (VL.onJoined) VL.onJoined(data);
     } catch (e) {
       if (e.code === "ROOM_NOT_FOUND_OR_WRONG_PASSWORD") {
-        showError("找不到这个房间 qwq 或密码不对");
+        showError(VL.t("voxlink.app.error.room_not_found_or_pw", "找不到这个房间 qwq 或密码不对"));
         els.pwField.classList.remove("hidden");
         els.pw.classList.add("shake");
         setTimeout(function () { els.pw.classList.remove("shake"); }, 400);
         els.pw.focus();
       } else if (e.code === "ROOM_FULL") {
-        showError("房间满了，稍后再来吧 :(");
+        showError(VL.t("voxlink.error.room_full", "房间满了，稍后再来吧 :("));
       } else if (e.code !== "NO_BACKEND") {
         showError(VL.errText(e));
       }
@@ -144,7 +146,11 @@
   function setBusy(b) {
     els.btn.disabled = b;
     var label = els.btn.querySelector("span:last-child");
-    if (label) label.textContent = b ? "正在加入…" : "加入房间";
+    if (label) {
+      label.textContent = b
+        ? VL.t("voxlink.attempting_join", "正在加入")
+        : VL.t("voxlink.join_room", "加入房间");
+    }
   }
 
   /* ---------------- 输入交互 ---------------- */
@@ -235,6 +241,9 @@
     cacheEls();
     bindInputs();
     updateFilledStyle();
+    // 按钮上的"正在加入/加入房间"是 setBusy 写的，换语言时按当前状态重说一次，
+    // 否则静态文案套用会把进行中的那句盖回"加入房间"
+    VL.onLangChange(function () { setBusy(!!els.btn.disabled); });
   };
 
   // 从大厅“加入”跳转时预填代码（预留）

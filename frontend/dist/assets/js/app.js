@@ -31,7 +31,7 @@
       if (!item) return;
       var page = item.getAttribute("data-page");
       if (page === "room" && !VL.roomInSession()) {
-        VL.toast("现在不在房间里哦，先加入或创建一个吧 qwq", "warn");
+        VL.toast(VL.t("voxlink.app.nav.not_in_room", "现在不在房间里哦，先加入或创建一个吧 qwq"), "warn");
         return;
       }
       VL.showPage(page);
@@ -51,7 +51,7 @@
     pill.classList.toggle("hidden", !inSession);
     if (inSession) {
       VL.$("#room-pill-code").textContent = room.code;
-      VL.$("#room-pill").title = "当前房间：" + (room.name || room.code);
+      VL.$("#room-pill").title = VL.t("voxlink.app.room.current_title", "当前房间：%s", room.name || room.code);
       VL.$(".nav-room").classList.remove("hidden");
       // 会话进行中：隐藏大厅/加入/创建三项（只剩"当前房间/相关链接/设置 + 房间胶囊"）
       VL.$$(".nav-hide-on-session").forEach(function (n) { n.classList.add("hidden"); });
@@ -104,7 +104,11 @@
 
   /* ---------------- 启动流程 ---------------- */
   async function boot() {
+    // 语言包必须在各页首次渲染之前到位：否则列表会先用兜底中文画一遍，
+    // 换语言时又要整体重画，玩家会看到一次明显的文字跳动。
+    await VL.initLang();
     VL.hydrateIcons(document);
+    VL.applyI18n(document);
     VL.initLobby();
     VL.initJoin();
     VL.initCreate();
