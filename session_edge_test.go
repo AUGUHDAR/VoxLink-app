@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -133,4 +134,55 @@ func TestClearSessionRunsTeardownHooks(t *testing.T) {
 		t.Errorf("clearSession 后占位没交还：%s", msg)
 	}
 	a.releaseSessionSlot()
+}
+
+// 4) Shutdown（关窗口 / Ctrl+C）必须通知服务端退房。
+// 只停本地不发 /room/leave 的话，服务端要等心跳超时（room_ttl=300s）才回收，
+// 这期间房间仍能被别的玩家凭房号加进来，进去就是"连接失败"——幽灵房。
+func TestShutdownNotifiesServerOfLeave(t *testing.T) {
+	var mu sync.Mutex
+	var routes []string
+	record := func(route string) {
+		mu.Lock()
+		routes = append(routes, route)
+		mu.Unlock()
+	}
+	has := func(route string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, r := range routes {
+			if r == route {
+				return true
+			}
+		}
+		return false
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route := r.URL.Query().Get("route")
+		record(route)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{}})
+	}))
+	defer srv.Close()
+
+	a := NewApp()
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	off := false
+	a.settings.AutoUPnP = &off
+	a.AttachSink(&captureSink{}, nil)
+	a.settings.ServerURL = srv.URL
+
+	a.startSession("AB23CD", "hosttok", true, map[string]any{"code": "AB23CD", "hostPort": 45999}, "client-1")
+	a.Shutdown()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !has("/room/leave") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !has("/room/leave") {
+		mu.Lock()
+		got := append([]string{}, routes...)
+		mu.Unlock()
+		t.Errorf("Shutdown 没通知服务端退房（幽灵房会活到心跳超时）；期间请求过的路由=%v", got)
+	}
 }

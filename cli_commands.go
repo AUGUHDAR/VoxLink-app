@@ -25,11 +25,17 @@ type cliParam struct {
 }
 
 func (p cliParam) bind(fs *flag.FlagSet) {
+	// Default 用类型断言取，不能硬断言：room update 的 --public 这类"可选开关"
+	// 刻意不写 Default，硬断言会在绑定阶段直接 panic（interface conversion: nil, not bool），
+	// 玩家/启动器连一行 JSON 都拿不到。缺省一律按零值，且 buildPayload 只回传
+	// 被显式设置过的参数（fs.Visit），所以零值默认不会污染请求体。
 	switch p.Kind {
 	case "int":
-		fs.Int(p.Name, p.Default.(int), p.Help)
+		def, _ := p.Default.(int)
+		fs.Int(p.Name, def, p.Help)
 	case "bool":
-		fs.Bool(p.Name, p.Default.(bool), p.Help)
+		def, _ := p.Default.(bool)
+		fs.Bool(p.Name, def, p.Help)
 	case "strings":
 		fs.String(p.Name, "", p.Help)
 	default:

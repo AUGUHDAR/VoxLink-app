@@ -153,15 +153,15 @@ func (a *App) Init() {
 	a.loadSettings()
 }
 
-// Shutdown 停掉当前会话（不保证 leave 成功）。
+// Shutdown 停掉当前会话并通知服务端。
+//
+// 必须走 leaveInternal，不能只 s.stop()：只停本地而不发 /room/leave，服务端要等心跳超时
+// （room_ttl=300s）才回收房间——玩家关掉窗口（UI 的 OnShutdown）或启动器 Ctrl+C 掉 CLI
+// 之后，那间房还能凭房号被加进来好几分钟，进去就是"连接失败"。
+// leaveInternal 会 bump 加入代数、拆引擎、后台补发 /room/leave，并跑 sessionStopped
+// （撤 UPnP 映射 + 日志上传 disarm）。
 func (a *App) Shutdown() {
-	a.mu.Lock()
-	s := a.session
-	a.mu.Unlock()
-	if s != nil {
-		s.stop()
-		a.engine.unbindSession(s)
-	}
+	a.leaveInternal()
 	upnpStop() // UPnPManager.stop()：停续租调度器并清空登记表（模组在客户端卸载时同调用）
 }
 

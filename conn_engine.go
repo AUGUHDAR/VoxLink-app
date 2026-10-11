@@ -974,7 +974,21 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 		curMapped := e.gMapped
 		e.mu.Unlock()
 		if curMapped != nil && udpAddrOf(curMapped) != nil {
-			curTarget = udpAddrOf(curMapped)
+			next := *udpAddrOf(curMapped) // 拷一份再改，别原地动到 e.gMapped 派生的地址对象
+			curTarget = &next
+			// 房主映射端口步长纠偏：模组 CM:3572-3578 在起连接周期时
+			// cyclePort = hostMappedPort + hostMappedPortDelta（并钳到 1..65535）。
+			// 但 CM:7751-7761 明确"房主是对称 NAT 时保持 mapped 端口、delta 跳过"，
+			// 理由写在它的日志里：同 socket 双 STUN 的差值不是跨 socket 的步长，拿来预测反而打偏。
+			// 两处合起来的口径就是：delta 只在非对称房主身上用。
+			e.mu.Lock()
+			delta, sym := e.gMappedDelta, e.gRemoteNat == natHardSym
+			e.mu.Unlock()
+			if delta != 0 && !sym {
+				if predicted := next.Port + delta; predicted > 0 && predicted <= 65535 {
+					next.Port = predicted
+				}
+			}
 		}
 
 		// 对端 NAT 分级/范围随信令纠偏（模组：新证据即重推荐档位）

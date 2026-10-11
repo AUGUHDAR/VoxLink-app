@@ -76,8 +76,15 @@ func natTypeFromSamples(samples []stunMappedAddr, fallback string) string {
 		}
 		return fallback
 	}
+	// 样本不足两个推不出"映射端口会不会随目的地变化"，模组在这种情况报 unknown
+	// （它的键取自 StunProbe 的 7 种细粒度结果，样本不够即 unknown；CM:2030-2036 注册的就是那个键）。
+	// 旧实现把单样本也当成 delta=0 → "cone"，而 "cone" 不在服务端白名单（server-go/util.go:73-81），
+	// 后台只能渲染成"未知·灰"，还会让自己以"优质锥型"身份进中继候选池被别人选中。
+	if len(samples) < 2 {
+		return "unknown"
+	}
 	if stunDeltaFromSamples(samples) == 0 {
-		return "cone"
+		return "full_cone"
 	}
 	return "symmetric"
 }
