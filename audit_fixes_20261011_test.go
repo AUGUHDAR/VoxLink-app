@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -315,5 +316,78 @@ func TestApiRealPayloadStillDecodes(t *testing.T) {
 	}
 	if out.SessionID != "abc" {
 		t.Fatalf("有 data 时必须覆盖调用方旧值，实际 %+v", out)
+	}
+}
+
+// Layer2 中继预热的门（CM:6391-6394）：只有对称 NAT 或同层 CGNAT 才预热，且一次进程只热一次。
+func TestRelayPrefetchGate(t *testing.T) {
+	a, _ := newAutoRelayTestApp(t)
+	e := a.engine
+	cases := []struct {
+		local, remote natClass
+		sameCgnat     bool
+		want          bool
+		why           string
+	}{
+		{natCone, natCone, false, false, "锥对锥该直连赢，不该多打一次拓扑"},
+		{natHardSym, natCone, false, true, "本端对称"},
+		{natCone, natEasySym, false, true, "对端易对称"},
+		{natCone, natCone, true, true, "两端同在一层 CGNAT"},
+		{natUnknown, natUnknown, false, false, "分级未知不猜"},
+	}
+	for _, c := range cases {
+		e.mu.Lock()
+		e.relayPrefetched, e.gSameCgnat = false, c.sameCgnat
+		e.mu.Unlock()
+		if got := e.shouldPrefetchRelay(c.local, c.remote); got != c.want {
+			t.Errorf("%s：local=%v remote=%v sameCgnat=%v 期望 %v 实际 %v", c.why, c.local, c.remote, c.sameCgnat, c.want, got)
+		}
+	}
+	e.mu.Lock()
+	e.relayPrefetched = true
+	e.mu.Unlock()
+	if e.shouldPrefetchRelay(natHardSym, natHardSym) {
+		t.Error("预热只做一次（模组 relayPrefetchFuture==null 同口径）")
+	}
+}
+
+// 预热门放行后，拓扑 poll 真的只发一次；锥对锥时一次都不发。
+func TestTopologyPrefetchFiresOnce(t *testing.T) {
+	var mu sync.Mutex
+	polls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("route") == "/topology/poll" {
+			mu.Lock()
+			polls++
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"success":true,"data":{"instructions":[]}}`)
+	}))
+	defer srv.Close()
+
+	a := NewApp()
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	a.settings.ServerURL = srv.URL
+	sink := &captureSink{}
+	a.AttachSink(sink, nil)
+	a.Init()
+	a.settings.ServerURL = srv.URL
+
+	t.Cleanup(func() { topologyPrefetched.Store(false) })
+	topologyPrefetched.Store(false)
+
+	tcl := installTopologyClient(a)
+	tcl.onRoomJoined("AB12CD", "tok", false, "client-9", 0)
+	t.Cleanup(func() { appTopologyClient.Store(nil) })
+
+	for i := 0; i < 5; i++ {
+		topologyPrefetchRelay()
+	}
+	mu.Lock()
+	got := polls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("预热应只发一次 /topology/poll，实际 %d 次", got)
 	}
 }

@@ -341,6 +341,43 @@ func (t *topologyClient) handleTopologySignal(signalType string, data map[string
 	_ = data // 模组的 data 未被消费（:153-168）
 }
 
+// topologyPrefetched CM:6399-6420 prefetchRelayCandidates 的 relayPrefetchFuture==null 门：
+// 模组的 ConnectionManager 与 RoomManager 同生命周期，所以这个"预热"一次进程只做一次。
+var topologyPrefetched atomic.Bool
+
+// topologyPrefetchRelay Layer2 中继预热（CM:6576-6586 的调用点在本端 NAT 分完档之后）。
+func topologyPrefetchRelay() {
+	t := getTopologyClient()
+	if t == nil || !topologyPrefetched.CompareAndSwap(false, true) {
+		return
+	}
+	t.pollTopologyNow()
+}
+
+// pollTopologyNow 与 pollTopology 同一条 /topology/poll，差别只是这里要出声：
+// 预热的意义就是"早点知道有没有备胎"，静默失败等于让排查猜。
+func (t *topologyClient) pollTopologyNow() {
+	t.mu.Lock()
+	code, token, isHost := t.roomCode, t.token, t.isHost
+	t.mu.Unlock()
+	if code == "" || token == "" {
+		return
+	}
+	var resp map[string]any
+	err := t.app.api.post(t.app.baseURL(), topoRoutePoll, map[string]any{
+		"code":       code,
+		"token":      token,
+		"isHost":     isHost,
+		"generation": 0,
+	}, &resp)
+	if err != nil {
+		t.app.netLog("warn", "Layer2 中继预热失败: "+err.Error())
+		return
+	}
+	t.app.netLog("info", "Layer2 中继预热完成")
+	topoRunOnMainThread(func() { t.handlePollInstructions(resp) })
+}
+
 // pollTopology 对应 :160-166：roomCode/token 齐备才轮询，成功才处理指令；
 // 失败模组完全静默（连日志都没有），本端保持一致。
 func (t *topologyClient) pollTopology() {

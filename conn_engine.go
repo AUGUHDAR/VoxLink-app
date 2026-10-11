@@ -162,6 +162,7 @@ type connEngine struct {
 	tcpPunchInFlight bool
 	tcpPunchToken    int64 // 邀约轮次令牌：35s 看门狗只清自己那一轮的占位
 	tcpPunchers      []*tcpPuncher
+	relayPrefetched  bool // CM:6576 relayPrefetchFuture==null 的等价门（一次进程只预热一次）
 	gMyMappedIP      string // guest 本端 STUN 映射 IP（tcp_punch_info 用）
 	gMyMappedPort    int    // guest 本端 STUN 映射端口（tcp_simopen_request 用，CM:7137）
 
@@ -827,6 +828,18 @@ func (e *connEngine) guestOnOffer(from string, data map[string]any) {
 	go e.guestPunchFlow(gen, offer, from)
 }
 
+// shouldPrefetchRelay CM:6391-6394：本端或对端对称、或两端映射到同一个公网 IP（同层 CGNAT）
+// 才值得提前预热中继；锥对锥本来就该直连赢，不必多打一次拓扑。
+// 门里的 relayPrefetched 对应模组 relayPrefetchFuture==null（CM:6576），一次进程只热一次。
+func (e *connEngine) shouldPrefetchRelay(local, remote natClass) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.relayPrefetched {
+		return false
+	}
+	return local.symmetric() || remote.symmetric() || e.gSameCgnat
+}
+
 // guestPunchFlow guest 打洞主流程（对齐模组 ConnectionManager 打洞编排）：
 // socket → STUN 分级 → punch_info → 等 mapped/齐射 → 档位推荐 + PunchTuner 自适应
 // 无限轮次循环（仅"连续 20 轮零收包"或"PREDICTION_OFF 封顶 50 且零收包"允许终局）。
@@ -972,6 +985,16 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 	profile := recommendProfile(localNat, remoteNat)
 	punchProfileSwitch(profile, "nat_matrix_"+localNat.String()+"x"+remoteNat.String())
 	e.app.netLog("info", "NAT 分级 local="+localNat.String()+" remote="+remoteNat.String()+" → 档位 "+profile.name)
+
+	// CM:6576-6586 Layer2：分完档就预热中继拓扑——对称 NAT 或两端同在一层 CGNAT 时，
+	// 直连很可能是打不通的，等失败才开始找备胎就晚了。模组用 relayPrefetchFuture==null
+	// 保证一次进程只热一次，本端同一口径（见 topologyPrefetchRelay）。
+	if e.shouldPrefetchRelay(localNat, remoteNat) {
+		e.mu.Lock()
+		e.relayPrefetched = true
+		e.mu.Unlock()
+		go topologyPrefetchRelay()
+	}
 
 	roomCode := ""
 	authKey := func() []byte {
