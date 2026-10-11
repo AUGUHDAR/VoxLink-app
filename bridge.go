@@ -494,7 +494,13 @@ func startGuestBridge(rc *rudpConn, downCb func()) (string, *tcpBridge, error) {
 				_ = tc.SetNoDelay(true) // MC 握手字节必须立刻进隧道
 			}
 			b.setConn(conn, b.tcp.Load())
-			go b.pump(conn)
+			// PB:1126-1127：上行泵跑在 accept 线程上，一条桥只服务一个 MC 连接；泵一结束
+			// PB:1087 的循环条件就不再成立 → 关监听退出。并发 accept 会让旧连接的收尾
+			// 通过 b.tcp.Load() 误关新连接，这里从形态上杜绝。
+			b.pump(conn)
+			b.stop()
+			unregisterJoinerBridge(b, ln)
+			return
 		}
 	}()
 	return ln.Addr().String(), b, nil

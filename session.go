@@ -421,6 +421,9 @@ func (s *session) handleSignals(sd signalsData) {
 
 // ---- WebSocket 通道 ----
 
+// wsFrameSeq WS 请求帧号发号器（全进程单调递增，见 wsSend）。
+var wsFrameSeq atomic.Int64
+
 type wsRequest struct {
 	ID     int64  `json:"id"`
 	Route  string `json:"route"`
@@ -478,7 +481,10 @@ func (s *session) wsSend(route string, body any) (*wsFrame, bool) {
 		s.wsMu.Unlock()
 		return nil, false
 	}
-	id := time.Now().UnixNano()
+	// 帧号取全进程自增：UnixNano 在 Windows 上只有 ~1ms 粒度，心跳与 poll 并发时
+	// 两个请求会撞进同一个 pending chan（先注册者拿不到回填，只能等超时回落 HTTP）。
+	// 0 保留给服务端推送帧，负数保留给"无 id"，所以从 1 起自增且永不复用。
+	id := wsFrameSeq.Add(1)
 	ch := make(chan *wsFrame, 1)
 	s.wsPending[id] = ch
 	s.wsMu.Unlock()

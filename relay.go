@@ -243,6 +243,15 @@ func (e *connEngine) relayPunchFlow(attempt int64, relayIP string, relayPort int
 		e.mu.Unlock()
 		return
 	}
+	// CM:11239-11241 两道门：connectionWon 已置位、或 relay_cone 传输已在册 ⇒ 后来的 notify 作废。
+	// rPunchLiveAttempt 补上模组 tryRelay 的 "Relay already trying, skip duplicate"（CM:10528-10530）：
+	// 建桥要 15s，期间 rRudp 还是空，两条同 attempt 的 notify 会各自建一条隧道并互相覆盖句柄。
+	if e.gP2PDone || e.rRudp != nil || e.rBridge != nil || e.rPunchLiveAttempt == attempt {
+		e.mu.Unlock()
+		e.app.netLog("warn", "中继隧道已在建立/已建立，忽略重复 relay_notify")
+		return
+	}
+	e.rPunchLiveAttempt = attempt
 	sock := e.gPunchSock
 	reused := sock != nil && e.gRudp == nil && e.gPuncher == nil
 	e.mu.Unlock()
@@ -255,7 +264,15 @@ func (e *connEngine) relayPunchFlow(attempt int64, relayIP string, relayPort int
 		sock = s
 	}
 
-	target := &net.UDPAddr{IP: net.ParseIP(relayIP), Port: relayPort}
+	relayAddr := net.ParseIP(relayIP)
+	if relayAddr == nil {
+		if !reused {
+			_ = sock.Close()
+		}
+		e.guestRelayFail(attempt, "中继地址无法解析: "+relayIP)
+		return
+	}
+	target := &net.UDPAddr{IP: relayAddr, Port: relayPort}
 	win, actual, perr := punchRelayOnce(sock, target, relayPunchTimeout)
 	if perr != nil {
 		if !reused {
@@ -273,6 +290,11 @@ func (e *connEngine) relayPunchFlow(attempt int64, relayIP string, relayPort int
 	// 载具热切（模组 startUdpPunchBridge 第一分支）：旧道被 25s 验证窗判死时，玩家中继这条新
 	// 承载不新建本地桥，只换承载。swapJoinerCarrier 内部会 start()，所以必须抢在 rc.Start() 之前。
 	if e.tryCarrierSwap(rc) {
+		e.mu.Lock()
+		if e.rPunchLiveAttempt == attempt {
+			e.rPunchLiveAttempt = 0
+		}
+		e.mu.Unlock()
 		if !reused {
 			_ = sock.Close()
 		}
@@ -289,6 +311,9 @@ func (e *connEngine) relayPunchFlow(attempt int64, relayIP string, relayPort int
 	if e.rDone || attempt != e.rAttempt || e.sess == nil {
 		// 写回屏障：打洞/建桥期间 20s 预算已判失败、本端已重开一轮或已退房，晚到的隧道直接丢弃，
 		// 否则既漏 socket 又会在"已失败"之后翻一个成功出来
+		if e.rPunchLiveAttempt == attempt {
+			e.rPunchLiveAttempt = 0
+		}
 		e.mu.Unlock()
 		_ = rc.Close()
 		bridge.stop()
@@ -347,9 +372,15 @@ func (e *connEngine) hostOnRelayRequest(from string, data map[string]any) {
 	requester := e.hPeers[from]
 	selfID := e.clientID
 	roomCode := e.code
+	// mapped 由 hostOnPunchInfo 在锁内写，这里也必须锁内取（L5 同类）
+	var reqIP string
+	var reqPort int
+	if requester != nil && requester.mapped != nil {
+		reqIP, reqPort = requester.mapped.IP, requester.mapped.Port
+	}
 	e.mu.Unlock()
 
-	if requester == nil || requester.mapped == nil {
+	if reqIP == "" || reqPort <= 0 {
 		e.app.netLog("warn", "relay_request 但缺少 requester 映射地址，拒绝")
 		_ = e.sendSignal("relay_declined", map[string]any{}, from)
 		return
@@ -369,8 +400,8 @@ func (e *connEngine) hostOnRelayRequest(from string, data map[string]any) {
 	// replyHostId：候选若也是房主（host-<CODE>）没有"自家房主"可回执，只能按这个 id 直投回来
 	setup := map[string]any{
 		"targetClientId": from,
-		"targetIp":       requester.mapped.IP,
-		"targetPort":     requester.mapped.Port,
+		"targetIp":       reqIP,
+		"targetPort":     reqPort,
 		"replyHostId":    "host-" + strings.ToUpper(roomCode),
 	}
 	if err := e.sendSignal("relay_setup", setup, cand.ClientID); err != nil {

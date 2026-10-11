@@ -642,6 +642,13 @@ func (c *rudpConn) recvLoop() {
 		_ = c.conn.SetReadDeadline(time.Now().Add(rudpTick))
 		n, from, err := c.conn.ReadFromUDP(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				// 承载 socket 被外部关掉（TURN TCP 兜底的 close 就是这一类）：
+				// 继续循环每次立即返回错误 = 单核 100% 空转且永不上报。按 Java 四个判死点
+				// 之一的形态走 closeWith，让泵进 15s 换道窗而不是静默硬扛。
+				c.closeWith("传输停滞: 承载 socket 已被关闭")
+				return
+			}
 			select {
 			case <-c.doneCh:
 				return

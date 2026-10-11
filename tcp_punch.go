@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,8 +34,11 @@ func tcpSelectPunchPort() int {
 }
 
 type tcpPuncher struct {
-	stopped bool
+	stopped atomic.Bool
 }
+
+// stop 让 punch 的两个窗口在下一个轮询点退出（退房时腾出占住的端口）。
+func (t *tcpPuncher) stop() { t.stopped.Store(true) }
 
 // punch bind 同端口互连，败转 listen。wonFlag 已置位时提前放弃。
 func (t *tcpPuncher) punch(remoteIP string, port, connectAttempts int, won func() bool) net.Conn {
@@ -44,7 +48,7 @@ func (t *tcpPuncher) punch(remoteIP string, port, connectAttempts int, won func(
 	if c := t.connectWindow(remoteIP, port, connectAttempts, won); c != nil {
 		return c
 	}
-	if t.stopped || won() {
+	if t.stopped.Load() || won() {
 		return nil
 	}
 	return t.listenWindow(port, remoteIP, won)
@@ -60,7 +64,7 @@ func (t *tcpPuncher) connectWindow(remoteIP string, port, attempts int, won func
 	if attempts <= 0 {
 		attempts = 1
 	}
-	for attempt := 1; attempt <= attempts && !t.stopped && !won(); attempt++ {
+	for attempt := 1; attempt <= attempts && !t.stopped.Load() && !won(); attempt++ {
 		if time.Now().After(deadline) {
 			break
 		}
@@ -84,7 +88,7 @@ func (t *tcpPuncher) listenWindow(port int, remoteIP string, won func() bool) ne
 	}
 	defer ln.Close()
 	deadline := time.Now().Add(tcpPunchListenWindow)
-	for !t.stopped && !won() && time.Now().Before(deadline) {
+	for !t.stopped.Load() && !won() && time.Now().Before(deadline) {
 		_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(tcpPunchAcceptPoll))
 		conn, err := ln.Accept()
 		if err != nil {
@@ -105,6 +109,16 @@ func (t *tcpPuncher) listenWindow(port int, remoteIP string, won func() bool) ne
 
 // ---- 编排（引擎侧）----
 
+// tcpPunchWatchdogDelay 邀约占位的看门狗时长（测试里可缩短，行为不变）。
+var tcpPunchWatchdogDelay = 35 * time.Second
+
+// trackTcpPuncher 登记在跑的 TCP 打洞器，退房时统一 stop（对应模组 activeHolePunchers 那本账）。
+func (e *connEngine) trackTcpPuncher(p *tcpPuncher) {
+	e.mu.Lock()
+	e.tcpPunchers = append(e.tcpPunchers, p)
+	e.mu.Unlock()
+}
+
 // tryTcpHolePunch guest 侧邀约：本端锥形、cycle≥1 且未连通时发 tcp_punch_info。
 // go 丢失看门狗：35s 后释放占位，下轮继续邀约。
 func (e *connEngine) tryTcpHolePunch(cycle int, localNat natClass, myMappedIP string) {
@@ -117,6 +131,8 @@ func (e *connEngine) tryTcpHolePunch(cycle int, localNat natClass, myMappedIP st
 		return
 	}
 	e.tcpPunchInFlight = true
+	e.tcpPunchToken++
+	tok := e.tcpPunchToken
 	code, isHost := e.code, e.isHost
 	e.mu.Unlock()
 	if isHost || code == "" {
@@ -132,10 +148,14 @@ func (e *connEngine) tryTcpHolePunch(cycle int, localNat natClass, myMappedIP st
 		e.mu.Unlock()
 		return
 	}
+	delay := tcpPunchWatchdogDelay
 	go func() {
-		time.Sleep(35 * time.Second)
+		time.Sleep(delay)
 		e.mu.Lock()
-		e.tcpPunchInFlight = false
+		// 令牌不符说明这一轮早就结束、新一轮已占位，僵尸看门狗不得清别人的占位
+		if e.tcpPunchToken == tok {
+			e.tcpPunchInFlight = false
+		}
 		e.mu.Unlock()
 	}()
 	_ = e.sendSignal("tcp_punch_info", map[string]any{
@@ -166,6 +186,7 @@ func (e *connEngine) hostOnTcpPunchInfo(from string, data map[string]any) {
 	_ = e.sendSignal("tcp_punch_go", map[string]any{"tcpPunchPort": port}, from)
 	go func() {
 		p := &tcpPuncher{}
+		e.trackTcpPuncher(p)
 		conn := p.punch(joinerIP, port, 5, func() bool { return e.p2pPeerConnected() })
 		e.onTcpPunchSocket(conn, true, from)
 	}()
@@ -186,6 +207,7 @@ func (e *connEngine) guestOnTcpPunchGo(data map[string]any) {
 	targetIP := hostMapped.IP
 	go func() {
 		p := &tcpPuncher{}
+		e.trackTcpPuncher(p)
 		conn := p.punch(targetIP, port, 1, func() bool { return e.p2pGuestDone() })
 		e.onTcpPunchSocket(conn, false, "")
 	}()
@@ -222,6 +244,9 @@ func (e *connEngine) onTcpPunchSocket(conn net.Conn, isHost bool, peerID string)
 		if tc, ok := local.(*net.TCPConn); ok {
 			_ = tc.SetNoDelay(true)
 		}
+		e.mu.Lock()
+		e.hTcpPairs = append(e.hTcpPairs, conn, local)
+		e.mu.Unlock()
 		go pumpTcpPair(conn, local)
 		e.app.netLog("info", "TCP 打洞成功，host 桥已建立")
 		return

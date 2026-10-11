@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -159,6 +160,8 @@ type connEngine struct {
 
 	// TCP SimOpen（tcp_punch.go）
 	tcpPunchInFlight bool
+	tcpPunchToken    int64 // 邀约轮次令牌：35s 看门狗只清自己那一轮的占位
+	tcpPunchers      []*tcpPuncher
 	gMyMappedIP      string // guest 本端 STUN 映射 IP（tcp_punch_info 用）
 	gMyMappedPort    int    // guest 本端 STUN 映射端口（tcp_simopen_request 用，CM:7137）
 
@@ -170,16 +173,17 @@ type connEngine struct {
 	hostNatClass natClass
 
 	// guest 玩家中继（relay.go）
-	rInFlight      bool
-	rDone          bool
-	rAttempt       int64 // 中继尝试轮次号：重试/退房时递增，用于作废上一轮在途收尾
-	rResult        chan string
-	rSock          *net.UDPConn
-	rPuncher       *puncher
-	rRudp          *rudpConn
-	rBridge        *tcpBridge
-	rConnectedHint bool
-	rAsNodeStop    func()
+	rInFlight         bool
+	rDone             bool
+	rAttempt          int64 // 中继尝试轮次号：重试/退房时递增，用于作废上一轮在途收尾
+	rPunchLiveAttempt int64 // 本轮 relayPunchFlow 已在建隧道（对应模组 currentRelayPeer 去重）
+	rResult           chan string
+	rSock             *net.UDPConn
+	rPuncher          *puncher
+	rRudp             *rudpConn
+	rBridge           *tcpBridge
+	rConnectedHint    bool
+	rAsNodeStop       func()
 
 	// TURN 中继（turn_flow.go）
 	turnInFlight      bool
@@ -195,6 +199,8 @@ type connEngine struct {
 	hPeers map[string]*hostPeer
 	// 本会话已向某候选派发过几次 relay_setup（挑最闲的候选用）
 	hRelayDispatched map[string]int
+	// host 侧 TCP 打洞赢下的成对连接（远端 + 本地 MC），对应模组 trackFallback 那本账
+	hTcpPairs []net.Conn
 }
 
 func newConnEngine(a *App) *connEngine {
@@ -294,6 +300,19 @@ func (e *connEngine) teardown() {
 	rPuncher, rSock, rRudp, rBridge := e.rPuncher, e.rSock, e.rRudp, e.rBridge
 	asNodeStop := e.rAsNodeStop
 	peers := e.hPeers
+	// peer 的 puncher/rudp 由 e.mu 保护写入，收尾也必须在锁内取值、锁外关闭
+	var peerPunchers []*puncher
+	var peerRudps []*rudpConn
+	for _, p := range peers {
+		if p.puncher != nil {
+			peerPunchers = append(peerPunchers, p.puncher)
+		}
+		if p.rudp != nil {
+			peerRudps = append(peerRudps, p.rudp)
+		}
+	}
+	hTcpPairs := e.hTcpPairs
+	tcpPunchers := e.tcpPunchers
 	// 断开通知所需快照（复位前抓取；复位后 postSignal 读不到会话字段）
 	sendBye := e.sess != nil && e.code != "" && e.token != ""
 	byeCode, byeToken, byeBase := e.code, e.token, e.app.baseURL()
@@ -348,8 +367,11 @@ func (e *connEngine) teardown() {
 	e.rRudp = nil
 	e.rBridge = nil
 	e.rConnectedHint = false
+	e.rPunchLiveAttempt = 0
 	e.rAsNodeStop = nil
 	e.hPeers = nil
+	e.hTcpPairs = nil
+	e.tcpPunchers = nil
 	e.hRelayDispatched = nil
 	e.mu.Unlock()
 
@@ -384,6 +406,15 @@ func (e *connEngine) teardown() {
 	if gTcpConn != nil {
 		_ = gTcpConn.Close()
 	}
+	// host 侧 TCP 桥成对连接：不登记就没人关，退房后仍有一条通往本地 MC 口的活桥
+	for _, c := range hTcpPairs {
+		if c != nil {
+			_ = c.Close()
+		}
+	}
+	for _, tp := range tcpPunchers {
+		tp.stop()
+	}
 	if rPuncher != nil {
 		rPuncher.stop()
 	}
@@ -399,13 +430,11 @@ func (e *connEngine) teardown() {
 	if asNodeStop != nil {
 		asNodeStop()
 	}
-	for _, p := range peers {
-		if p.puncher != nil {
-			p.puncher.stop()
-		}
-		if p.rudp != nil {
-			_ = p.rudp.Close()
-		}
+	for _, pn := range peerPunchers {
+		pn.stop()
+	}
+	for _, rc := range peerRudps {
+		_ = rc.Close()
 	}
 }
 
@@ -500,7 +529,9 @@ func (e *connEngine) onSignal(typ, from string, data map[string]any) {
 		e.onPeerDisconnect(from)
 	case "relay_request":
 		if e.roleIsHost() {
-			e.hostOnRelayRequest(from, data)
+			// 派发内有 1 次 GET + 2 次 POST（各 10s），同步跑会把 WS 读循环占住，
+			// 心跳只能等或超时降级；与 turn_alloc 路径同样离开分发线程。
+			go e.hostOnRelayRequest(from, data)
 		}
 	case "relay_notify":
 		if !e.roleIsHost() {
@@ -1409,14 +1440,17 @@ func (e *connEngine) onRequestIceRestart(from string) {
 		e.mu.Lock()
 		p := e.hPeers[from]
 		delete(e.hPeers, from)
-		e.mu.Unlock()
+		var pn *puncher
+		var rc *rudpConn
 		if p != nil {
-			if p.puncher != nil {
-				p.puncher.cancel()
-			}
-			if p.rudp != nil {
-				_ = p.rudp.Close()
-			}
+			pn, rc = p.puncher, p.rudp
+		}
+		e.mu.Unlock()
+		if pn != nil {
+			pn.cancel()
+		}
+		if rc != nil {
+			_ = rc.Close()
 		}
 		return
 	}
@@ -1441,14 +1475,19 @@ func (e *connEngine) onPeerDisconnect(from string) {
 		e.mu.Lock()
 		p := e.hPeers[from]
 		delete(e.hPeers, from)
-		e.mu.Unlock()
+		var pn *puncher
+		var rc *rudpConn
 		if p != nil {
-			if p.puncher != nil {
-				p.puncher.stop()
-			}
-			if p.rudp != nil {
-				_ = p.rudp.Close()
-			}
+			pn, rc = p.puncher, p.rudp
+		}
+		e.mu.Unlock()
+		if pn != nil {
+			pn.stop()
+		}
+		if rc != nil {
+			_ = rc.Close()
+		}
+		if p != nil {
 			e.app.netLog("info", "对端已断开")
 		}
 		return
@@ -1788,18 +1827,19 @@ func (e *connEngine) hostRestartPeer(peerID string) {
 	delete(e.hPeers, peerID)
 	var caps []string
 	proto := 0
+	var pn *puncher
+	var rc *rudpConn
 	if p != nil {
 		caps = p.caps
 		proto = p.protoVersion
+		pn, rc = p.puncher, p.rudp
 	}
 	e.mu.Unlock()
-	if p != nil {
-		if p.puncher != nil {
-			p.puncher.cancel()
-		}
-		if p.rudp != nil {
-			_ = p.rudp.Close()
-		}
+	if pn != nil {
+		pn.cancel()
+	}
+	if rc != nil {
+		_ = rc.Close()
 	}
 	if caps != nil || p != nil {
 		// 重放必须带上 clientProtocolVersion，否则一次 ICE 重启就把新版房客降级成 legacy，
@@ -1911,8 +1951,9 @@ func absInt(v int) int {
 
 // ---- TryDirect：直连探测 ----
 
-// tryDirectContext 直连探测防并发。
-var directMu sync.Mutex
+// tryDirectContext 直连探测防并发。TryLock 只覆盖到起协程前，两次连点会出两套
+// conn:state 交替；标志必须在探测本体结束时才清。
+var directBusy atomic.Bool
 
 // tryDirect TCP 直连探测 hostIp:hostPort，成功即回报（探测连接随即关闭）。
 func (e *connEngine) tryDirect() error {
@@ -1923,12 +1964,12 @@ func (e *connEngine) tryDirect() error {
 	if sess == nil {
 		return fmt.Errorf("当前没有房间会话")
 	}
-	if !directMu.TryLock() {
+	if !directBusy.CompareAndSwap(false, true) {
 		return fmt.Errorf("直连探测已在进行中")
 	}
-	defer directMu.Unlock()
 
 	go func() {
+		defer directBusy.Store(false)
 		e.notifyState(phaseDirect, statusTrying, "", "")
 		if hostIp == "" || hostPort <= 0 {
 			e.app.netLog("warn", "直连探测缺少目标")
