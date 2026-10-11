@@ -59,11 +59,15 @@ jobs:
             native: true
           - name: cli-macos-amd64
             variant: cli
-            os: macos-13
+            # Intel 版不再等 macos-13 runner：GitHub 正在下线 Intel macOS runner，
+            # 实测两格在队列里挂了 2 小时没落地，而 release 任务 needs: build，
+            # 整条发布被拖住永远不发。改在同一台 arm64 runner 上交叉编译
+            # （CLI 是纯 Go，CGO_ENABLED=0，交叉零风险），冒烟用 Rosetta 真跑。
+            os: macos-latest
             goos: darwin
             goarch: amd64
-            native: true
-            # GitHub 正在淘汰 Intel macOS runner：这一格失败不拖红整条发布。
+            rosetta: true
+            # 交叉产物万一有问题，宁可这一格单独红，也不要把 6 个能用的产物一起拖没。
             continue-on-error: true
           # ---- UI 版：需要各平台的 CGO 工具链，只能在对应平台产 ----
           - name: ui-windows-amd64
@@ -86,12 +90,14 @@ jobs:
             native: true
           - name: ui-macos-amd64
             variant: ui
-            os: macos-13
+            # 同上：Intel runner 已不可用，改在 arm64 runner 上交叉。
+            # UI 是 CGO（WKWebView），靠 universal SDK 用 clang -arch x86_64 目标编，
+            # 产物架构有单独一步核验，编不出 x86_64 就在这里红，不会静默发一个 arm64 包。
+            os: macos-latest
             goos: darwin
             goarch: amd64
-            native: true
-            # GitHub 正在淘汰 Intel macOS runner：这一格失败不拖红整条发布，
-            # 由 Release 正文说明 Intel 版待补。
+            crosscgo: true
+            # 这一格失败不拖红整条发布，由 Release 正文说明 Intel 版待补。
             continue-on-error: true
 
     runs-on: ${{ matrix.os }}
@@ -99,6 +105,20 @@ jobs:
       run:
         shell: bash   # Windows runner 的默认 shell 是 PowerShell：不设这一行，
                       # 构建步骤里的 `if [ ... ]` 会以 ParserError 直接挂掉
+    # GOOS/GOARCH/CGO_* 放在**任务级**而不是构建步骤级：UPX 那一步压不动 Mach-O 时会
+    # 原地重建一份未压缩产物，如果这些变量只在构建步骤里，那次重建就会按 runner 自己的
+    # 架构编——Intel 格会静默上传一个 arm64 二进制却叫 darwin-amd64。
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      # Windows 的 wails 前端不需要 CGO（WebView2 走 COM）；在这里强开 CGO 会因为
+      # runner 上没有 gcc 而直接失败。只有 linux/mac 的 UI 必须开。
+      CGO_ENABLED: ${{ matrix.variant == 'ui' && matrix.goos != 'windows' && '1' || '0' }}
+      # macOS 新 SDK 把 UTType 从 AppKit 挪进了 UniformTypeIdentifiers，wails 的 cgo
+      # 声明没跟上 → 链接期 "Undefined symbols: _OBJC_CLASS_$_UTType"。补这一个 framework 就过。
+      # 交叉出 Intel 版时再加 -arch x86_64。
+      CGO_LDFLAGS: ${{ matrix.goos == 'darwin' && (matrix.crosscgo == true && '-arch x86_64 -framework UniformTypeIdentifiers' || '-framework UniformTypeIdentifiers') || '' }}
+      CGO_CFLAGS: ${{ matrix.goos == 'darwin' && matrix.crosscgo == true && '-arch x86_64' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -118,17 +138,13 @@ jobs:
           go env CC CGO_ENABLED
 
       - name: 构建
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          # Windows 的 wails 前端不需要 CGO（WebView2 走 COM）；在这里强开 CGO 会因为
-          # runner 上没有 gcc 而直接失败。只有 linux/mac 的 UI 必须开。
-          CGO_ENABLED: ${{ matrix.variant == 'ui' && matrix.goos != 'windows' && '1' || '0' }}
-          # macOS 新 SDK 把 UTType 从 AppKit 挪进了 UniformTypeIdentifiers，wails 的 cgo
-          # 声明没跟上 → 链接期 "Undefined symbols: _OBJC_CLASS_$_UTType"。补这一个 framework 就过。
-          CGO_LDFLAGS: ${{ matrix.goos == 'darwin' && '-framework UniformTypeIdentifiers' || '' }}
         run: |
           go version
+          if [ "${{ matrix.crosscgo }}" = "true" ]; then
+            # arm64 runner 交叉 Intel：SDK 是 universal 的，clang 带 -arch 就够，
+            # 前提是 CC 本身也带上，否则 go 的外部链接器会退回默认 target。
+            export CC="clang -arch x86_64"
+          fi
           # 后缀与 GUI 子系统标志都按"目标平台"判，不按 runner 判：
           # CLI 的 windows 产物是在 ubuntu runner 上交叉编译出来的，用 RUNNER_OS 判会
           # 产出一个没有 .exe 的 Windows 可执行文件（启动器和玩家都没法双击/识别）。
@@ -173,6 +189,33 @@ jobs:
             echo "UPX=未压缩（UPX 不支持该平台/格式）" >> "$GITHUB_STEP_SUMMARY"
           fi
           ls -la "$ARTIFACT"
+
+      - name: 校验 macOS 产物架构（防止 Intel 格静默上传 arm64 包）
+        if: matrix.goos == 'darwin'
+        run: |
+          file "$ARTIFACT"
+          ARCHS=$(lipo -archs "$ARTIFACT")
+          echo "lipo -archs = $ARCHS"
+          # 交叉/压坏/重建走错架构都会在这里现形，而不是等玩家双击时报
+          # "无法打开，因为此 App 是为这台 Mac 的较旧版本构建"（或反过来）。
+          case "$ARCHS" in
+            *${{ matrix.goarch }}*) ;;
+            *) echo "::error::产物架构是 [$ARCHS]，期望 ${{ matrix.goarch }}"; exit 1 ;;
+          esac
+          echo "ARCH=$ARCHS（期望 ${{ matrix.goarch }}）" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Intel 冒烟（CLI 交叉产物用 Rosetta 真跑一次）
+        # rosetta 格 = 在 arm64 runner 上交叉出来的 darwin/amd64。
+        # 只验"这份 x86_64 Mach-O 能被加载并跑出契约 JSON"，不验 Intel 机器上的 GUI
+        # （UI 版是窗口程序，runner 上没有显示器）；Intel UI 的运行时风险在 Release 正文里如实写明。
+        if: matrix.variant == 'cli' && matrix.rosetta == true
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license ||
+            softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 "./$ARTIFACT" describe --json > smoke.json
+          test -s smoke.json
+          grep -q '"commands"' smoke.json
+          echo "SMOKE=通过（Rosetta x86_64）" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 冒烟（CLI 版在所属平台上真跑一次：压坏了必须在这里暴露，而不是在玩家机器上）
         # UI 版不跑：它是窗口程序，runner 上没有显示器，而且 -H windowsgui 不写 stdout。
@@ -226,3 +269,10 @@ jobs:
           body: |
             两个版本：`VoxLink-UI-*`（图形界面）、`VoxLink-CLI-*`（给启动器集成，无窗口）。
             CLI 版经 UPX 压缩，部分杀软可能误报，校验和见 SHA256SUMS.txt。
+
+            macOS 的两个架构：`darwin-arm64` 在 Apple Silicon runner 上原生构建；
+            `darwin-amd64`（Intel）因为 GitHub 已停用 Intel macOS runner，改在同一台
+            arm64 runner 上交叉编译。两者都在 CI 里用 `lipo -archs` 核过架构，
+            Intel 的 CLI 还额外在 Rosetta 下真跑过一次命令面。
+            Intel 的 UI 版只能静态核验（架构 + 链接），没有 Intel 实机跑过，
+            在这台机器上打不开请回退到 `darwin-arm64` 或直接反馈。
