@@ -5,10 +5,20 @@ package main
 // ≥10 → ±32；≥5 → ±64；≥3 → ±100；否则 ±200；钳制 [1024,65535]；
 // generateTargetPorts 围绕预测值 ±range 逐偏移上下交替扫。
 
+import "math"
+
 const (
 	predictorMinPort = 1024
 	predictorMaxPort = 65535
 )
+
+// javaRound 等价 (int)Math.round(x)：Java 的 Math.round 是 floor(x+0.5)，
+// Go 的 int(x+0.5) 是朝零截断，两者只在负数上分叉（-2.6：Java -3、截断 -2）。
+// 端口预测的 delta 完全可能是负的（映射端口在往下走），所以四处取整必须同一口径，
+// 否则预测值与模组差 1 个端口，扫的就是错的那一格。
+func javaRound(x float64) int {
+	return int(math.Floor(x + 0.5))
+}
 
 type predictResult struct {
 	predictedPort int
@@ -44,11 +54,11 @@ func linearRegressionPredict(ports []int) int {
 	}
 	denom := float64(n)*sumXX - sumX*sumX
 	if absF(denom) < 1e-9 {
-		return int(sumY/float64(n) + 0.5)
+		return javaRound(sumY / float64(n))
 	}
 	slope := (float64(n)*sumXY - sumX*sumY) / denom
 	intercept := (sumY - slope*sumX) / float64(n)
-	return int(slope*float64(n) + intercept + 0.5)
+	return javaRound(slope*float64(n) + intercept)
 }
 
 // deltaPredict 截头去尾 1/4 后的 EMA(α=0.4)，预测 = 末样本 + delta。
@@ -77,12 +87,7 @@ func deltaPredict(ports []int) int {
 	for _, d := range trimmed[1:] {
 		ema += alpha * (float64(d) - ema)
 	}
-	delta := int(ema + 0.5)
-	// Java Math.round 对负数是 floor(x+0.5)，Go int(x+0.5) 截断方向在负数上有差异，校正
-	if ema < 0 && float64(delta) != ema+0.5 {
-		delta = int(ema+0.5) - 1
-	}
-	return ports[len(ports)-1] + delta
+	return ports[len(ports)-1] + javaRound(ema)
 }
 
 // predict 融合预测（单样本直接用该端口 range=200）。
@@ -97,7 +102,7 @@ func predict(ports []int) predictResult {
 	deltaPredicted := deltaPredict(ports)
 	var final int
 	if lrPredicted > 0 && deltaPredicted > 0 {
-		final = int(float64(lrPredicted)*0.6 + float64(deltaPredicted)*0.4 + 0.5)
+		final = javaRound(float64(lrPredicted)*0.6 + float64(deltaPredicted)*0.4)
 	} else if lrPredicted > 0 {
 		final = lrPredicted
 	} else {

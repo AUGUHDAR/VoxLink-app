@@ -1468,3 +1468,28 @@ func TestSeqArithmetic(t *testing.T) {
 		t.Fatal("seqDiff wraparound broken")
 	}
 }
+
+// (int)Math.round(x) 就是 floor(x+0.5)；Go 的 int(x+0.5) 朝零截断，只在负数上分叉。
+// 端口在往下走时 delta 是负的，取整口径错了预测值就差一个端口——扫的正是错的那一格。
+func TestJavaRoundMatchesMathRound(t *testing.T) {
+	cases := []struct {
+		x    float64
+		want int
+	}{
+		{-2.6, -3}, {-2.4, -2}, {-1.5, -1}, {-0.6, -1},
+		{-0.4, 0}, {-0.5, 0}, {0.0, 0}, {0.4, 0}, {0.5, 1}, {2.6, 3},
+	}
+	for _, c := range cases {
+		if got := javaRound(c.x); got != c.want {
+			t.Errorf("javaRound(%v)=%d want %d（floor(x+0.5)）", c.x, got, c.want)
+		}
+	}
+	// 递减端口序列：旧实现的手写校正在 (-0.5,0) 这一段会把 0 折成 -1
+	ports := []int{20100, 20099, 20098, 20097}
+	if got := deltaPredict(ports); got != 20096 {
+		t.Fatalf("等差递减端口应预测末位再减 1, got %d", got)
+	}
+	if got := deltaPredict([]int{20100, 20099, 20098, 20097, 20096, 20095, 20094, 20093}); got != 20092 {
+		t.Fatalf("8 样本等差递减应预测 20092, got %d", got)
+	}
+}
