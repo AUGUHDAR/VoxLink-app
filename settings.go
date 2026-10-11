@@ -25,6 +25,9 @@ type appSettings struct {
 	// AutoUPnP 与模组 VoxLinkConfig.autoUPnP 同一个开关、同一个默认值 true（VoxLinkConfig.java:35/58/86）。
 	// 房主建房时是否向路由器请求端口映射（RoomManager.java:166 的那道 if）。
 	AutoUPnP *bool `json:"autoUPnP"`
+	// Language 界面语言："auto"（默认，跟随系统/WebView 语言）或 lang/ 下的具体代码（zh_cn 等）。
+	// 只有带界面的版本用得上，CLI 按用户裁决不做多语言。
+	Language string `json:"language"`
 }
 
 func defaultSettings() appSettings {
@@ -34,6 +37,7 @@ func defaultSettings() appSettings {
 		Theme:        "light",
 		ClientTag:    "",
 		RelayEnabled: &on,
+		Language:     "auto",
 	}
 }
 

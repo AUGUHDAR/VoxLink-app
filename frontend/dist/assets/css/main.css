@@ -788,6 +788,11 @@ html[data-theme="dark"] .brand-logo {
   align-items: start;
 }
 .room-col-main, .room-col-side { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+/* 卡片本身也是 flex 子项，min-width 默认 auto：里面放一张不换行的长文件名表格时，
+   整张卡会被撑破栅格轨道、直接画到右列上面（玩家看到的"清单压在设置卡上、右边还被裁掉"）。
+   这里让卡片可收缩，并把清单区做成横向滚动，表格再宽也只在卡内滚。 */
+.room-col-main > .card, .room-col-side > .card { min-width: 0; }
+#mods-body { min-width: 0; overflow-x: auto; }
 
 @media (max-width: 920px) {
   .room-grid-2col { grid-template-columns: 1fr; }
@@ -839,7 +844,7 @@ html[data-theme="dark"] .brand-logo {
 .netlog-ts { color: var(--text-faint); margin-right: var(--sp-2); }
 
 /* ModSync / 中继 表格 */
-.mini-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.mini-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
 .mini-table th {
   text-align: left;
   font-size: 11px;

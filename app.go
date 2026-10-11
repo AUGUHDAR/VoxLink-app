@@ -456,10 +456,16 @@ func (a *App) GetSettings() string {
 	a.mu.Lock()
 	theme := a.settings.Theme
 	clientTag := a.settings.ClientTag
+	language := a.settings.Language
 	a.mu.Unlock()
+	if language == "" {
+		language = "auto"
+	}
 	return wrapOK(map[string]any{
 		"serverUrl":    defaultServerURL,
 		"theme":        theme,
+		"language":     language,
+		"languages":    availableLangs(),
 		"version":      appVersion,
 		"clientTag":    clientTag,
 		"relayEnabled": a.relayEnabled(),
@@ -477,6 +483,7 @@ func (a *App) SaveSettings(settingsJSON string) string {
 		ClientTag    *string `json:"clientTag"`
 		RelayEnabled *bool   `json:"relayEnabled"`
 		AutoUPnP     *bool   `json:"autoUPnP"`
+		Language     string  `json:"language"`
 	}
 	if err := parseParams(settingsJSON, &req); err != nil {
 		return wrapErr("INVALID_PARAMS", err.Error())
@@ -495,6 +502,12 @@ func (a *App) SaveSettings(settingsJSON string) string {
 	a.mu.Lock()
 	if req.Theme != "" {
 		a.settings.Theme = req.Theme
+	}
+	if req.Language != "" {
+		// 只认 "auto" 与 lang/ 里真有的代码：写错的语言会让界面整片空白，宁可忽略
+		if req.Language == "auto" || langPackOf(req.Language) != nil {
+			a.settings.Language = req.Language
+		}
 	}
 	if cleanTag != nil {
 		a.settings.ClientTag = *cleanTag
