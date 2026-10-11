@@ -20,6 +20,9 @@
     });
     var main = VL.$("#main");
     if (main) main.scrollTop = 0;
+    // 设置页里有个开关写在另一份文件（modsync.json），可能被创建房间页改过，
+    // 切过来时刷新一次，避免显示旧值。
+    if (name === "settings" && VL.refreshSettings) VL.refreshSettings();
   };
 
   function bindNav() {

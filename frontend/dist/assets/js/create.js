@@ -27,7 +27,6 @@
     els.portRow = VL.$("#create-port-row");
     els.visible = VL.$("#create-visible");
     els.msPublish = VL.$("#create-ms-publish");
-    els.msJoin = VL.$("#create-ms-join");
     els.msInstance = VL.$("#create-ms-instance");
     els.msNew = VL.$("#create-ms-new");
     els.msDel = VL.$("#create-ms-del");
@@ -88,20 +87,25 @@
       msView = v || null;
       renderInstances();
       els.msPublish.checked = !(msView && msView.hostModSyncPublish === false);
-      els.msJoin.checked = !(msView && msView.joinRequiredModsCheck === false);
     }, function () { /* 后端不可用时保持默认，不打扰玩家 */ });
   }
 
-  // patch 只带要改的字段，其余按当前值原样回写
+  // SaveModSyncSettings 是整体回写：少带任何一个字段就等于把它删掉。
+  // 所以每次写之前都重新读一次现状，而不是用页面里那份可能已经过期的 msView ——
+  // 「加入前检查必装 Mod」现在归设置页写，建房页若拿旧快照回写就会把它悄悄改回去。
   function saveModSync(patch) {
-    var payload = {
-      instances: msInstances(),
-      activeInstance: (msView && msView.activeInstance) || "",
-      joinRequiredModsCheck: !!(msView && msView.joinRequiredModsCheck !== false),
-      hostModSyncPublish: !!(msView && msView.hostModSyncPublish !== false)
-    };
-    Object.keys(patch || {}).forEach(function (k) { payload[k] = patch[k]; });
-    return VL.api("SaveModSyncSettings", JSON.stringify(payload)).then(function (v) {
+    return VL.api("GetModSyncSettings").then(function (cur) {
+      if (cur) msView = cur;
+      var base = msView || {};
+      var payload = {
+        instances: msInstances(),
+        activeInstance: base.activeInstance || "",
+        joinRequiredModsCheck: !(base.joinRequiredModsCheck === false),
+        hostModSyncPublish: !(base.hostModSyncPublish === false)
+      };
+      Object.keys(patch || {}).forEach(function (k) { payload[k] = patch[k]; });
+      return VL.api("SaveModSyncSettings", JSON.stringify(payload));
+    }).then(function (v) {
       msView = v || msView;
       renderInstances();
       return v;
@@ -123,9 +127,6 @@
     });
     els.msPublish.addEventListener("change", function () {
       saveModSync({ hostModSyncPublish: !!els.msPublish.checked });
-    });
-    els.msJoin.addEventListener("change", function () {
-      saveModSync({ joinRequiredModsCheck: !!els.msJoin.checked });
     });
     els.msNew.addEventListener("click", function () { showInstanceForm(true); });
     els.msCancelNew.addEventListener("click", function () { showInstanceForm(false); });

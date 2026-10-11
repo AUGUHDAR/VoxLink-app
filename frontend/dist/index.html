@@ -253,13 +253,6 @@
             </div>
             <label class="switch" title="只影响这间房：房客进入前会比对你的必装清单"><input type="checkbox" id="create-ms-publish" checked><span class="slider"></span></label>
           </div>
-          <div class="field switch-field">
-            <div>
-              <div class="field-label">加入前检查必装 Mod</div>
-              <div class="field-sub">这条管的是你加入别人房间：先比对清单，缺了提示下载</div>
-            </div>
-            <label class="switch" title="只影响你加入别人房间时要不要先查清单"><input type="checkbox" id="create-ms-join" checked><span class="slider"></span></label>
-          </div>
           <div class="form-warn hidden" id="create-pw-warn">设置了密码，房间创建时会自动大厅隐藏哦</div>
           <div class="form-error hidden" id="create-error"></div>
           <button class="btn btn-primary btn-lg btn-block" id="create-btn">
@@ -488,9 +481,21 @@
             </select>
           </div>
           <div class="field switch-field">
-            <div><div class="field-label">玩家中继</div></div>
-            <label class="switch" title="开着才会被别人选中做中继，也能使用别人的中继；只影响玩家中继，不影响 TURN">
+            <div>
+              <div class="field-label">玩家中继</div>
+              <div class="field-sub">开着才会被别人选中做中继，也能使用别人的中继</div>
+            </div>
+            <label class="switch" title="只影响玩家中继，不影响 TURN">
               <input type="checkbox" id="set-relay"><span class="slider"></span>
+            </label>
+          </div>
+          <div class="field switch-field">
+            <div>
+              <div class="field-label">加入前检查必装 Mod</div>
+              <div class="field-sub">加入别人房间时先比对房主的必装清单，缺了提示下载</div>
+            </div>
+            <label class="switch" title="这条管的是你加入别人房间；别人加入你的房间由创建房间页的开关决定">
+              <input type="checkbox" id="set-ms-join"><span class="slider"></span>
             </label>
           </div>
           <div class="form-error hidden" id="settings-error"></div>
