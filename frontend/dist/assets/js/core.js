@@ -261,8 +261,18 @@ window.VL = window.VL || {};
       VL.lang.code = last.code || VL.lang.code;
       VL.lang.strings = last.strings || {};
     }
+    applyDocumentDirection(VL.lang.code);
     return VL.lang;
   };
+
+  // RTL 语言要镜像版面（与主站 index.html 的 dir 口径一致）：
+  // 只把文字反排而标签仍靠左，阿拉伯语读起来是"半拉子 RTL"，标题与内容对不上边。
+  function applyDocumentDirection(code) {
+    var el = document.documentElement;
+    if (!el) return;
+    el.dir = /^ar_/i.test(code || "") ? "rtl" : "ltr";
+    if (code) el.lang = String(code).replace(/_/g, "-").toLowerCase();
+  }
 
   // 启动时先取语言设置再取包；无后端时两者都静默失败，strings 留空 → 全部显示兜底中文。
   VL.initLang = async function () {

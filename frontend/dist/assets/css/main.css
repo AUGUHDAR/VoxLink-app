@@ -346,6 +346,9 @@ html[data-theme="dark"] .brand-logo {
 .msi-head { cursor: pointer; align-items: center; gap: var(--sp-3); }
 .msi-caret { width: 0; height: 0; border-left: 5px solid var(--text-faint); border-top: 4px solid transparent; border-bottom: 4px solid transparent; flex: 0 0 auto; transition: transform .12s ease; }
 .msi-item.open .msi-caret { transform: rotate(90deg); }
+/* RTL（ar_sa）下三角要朝左，展开时仍朝下；主站同样按 [dir="rtl"] 逐处镜像方向性图标 */
+[dir="rtl"] .msi-caret { transform: scaleX(-1); }
+[dir="rtl"] .msi-item.open .msi-caret { transform: scaleX(-1) rotate(-90deg); }
 .msi-fields { display: none; padding-top: var(--sp-3); }
 .msi-item.open .msi-fields { display: block; }
 .msi-acts { margin-left: auto; display: flex; gap: var(--sp-2); flex: 0 0 auto; }
