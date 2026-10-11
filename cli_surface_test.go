@@ -1,3 +1,5 @@
+//go:build cli
+
 package main
 
 // CLI 命令面的健壮性回归。起因是真机测出来的崩溃：
