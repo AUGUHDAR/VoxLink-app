@@ -196,13 +196,20 @@ jobs:
           file "$ARTIFACT"
           ARCHS=$(lipo -archs "$ARTIFACT")
           echo "lipo -archs = $ARCHS"
+          # Mach-O 的架构名和 Go 的不是一套：amd64 在 lipo 里叫 x86_64（arm64 两边同名）。
+          # 直接拿 GOARCH 去匹配会两边都误报——上一版就是这么把一份好产物判成错架构的。
+          case "${{ matrix.goarch }}" in
+            amd64) EXPECT=x86_64 ;;
+            arm64) EXPECT=arm64 ;;
+            *) EXPECT=${{ matrix.goarch }} ;;
+          esac
           # 交叉/压坏/重建走错架构都会在这里现形，而不是等玩家双击时报
           # "无法打开，因为此 App 是为这台 Mac 的较旧版本构建"（或反过来）。
           case "$ARCHS" in
-            *${{ matrix.goarch }}*) ;;
-            *) echo "::error::产物架构是 [$ARCHS]，期望 ${{ matrix.goarch }}"; exit 1 ;;
+            *"$EXPECTED"*) ;;
+            *) echo "::error::产物架构是 [$ARCHS]，期望 $EXPECTED（GOARCH=${{ matrix.goarch }}）"; exit 1 ;;
           esac
-          echo "ARCH=$ARCHS（期望 ${{ matrix.goarch }}）" >> "$GITHUB_STEP_SUMMARY"
+          echo "ARCH=$ARCHS（期望 $EXPECTED）" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Intel 冒烟（CLI 交叉产物用 Rosetta 真跑一次）
         # rosetta 格 = 在 arm64 runner 上交叉出来的 darwin/amd64。

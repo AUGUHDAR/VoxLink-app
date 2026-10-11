@@ -14,13 +14,20 @@ import (
 	"time"
 )
 
-// testStream 内存版 bridgeStream：写端入队，读端按模组读侧语义（短轮询 + abort）。
+// testStream 内存版 bridgeStream：读写两个方向分开记账，读端按模组读侧语义（短轮询 + abort）。
+//
+// 早先这里只有一个 queue：in() 从它取、out() 往它塞。于是"测试喂进去的 handshake"
+// 会被 A→B 泵搬进对端的同一个 queue，而 B→A 泵又把那个 queue 当作自己的读侧搬回来——
+// 两条泵在两个 queue 之间把同一批字节无限对倒。Windows 上靠时序碰巧收敛（断言赶在下一次
+// 对倒之前看到字节），linux runner 上时序不同就露馅：B队列="loginhandshake"、A队列=""。
+// 那是夹具自己造了个回环，不是转发器的缺陷，所以修的是这里。
 type testStream struct {
-	mu     sync.Mutex
-	queue  [][]byte
-	eof    bool
-	closes int
-	done   chan struct{}
+	mu      sync.Mutex
+	toPump  [][]byte // 测试喂给泵读侧的字节
+	arrived [][]byte // 泵写出来的字节（断言读这里）
+	eof     bool
+	closes  int
+	done    chan struct{}
 }
 
 func newTestStream() *testStream {
@@ -30,13 +37,13 @@ func newTestStream() *testStream {
 func (s *testStream) in(p []byte, abort <-chan struct{}) (int, error) {
 	for {
 		s.mu.Lock()
-		if len(s.queue) > 0 {
-			chunk := s.queue[0]
+		if len(s.toPump) > 0 {
+			chunk := s.toPump[0]
 			n := copy(p, chunk)
 			if n == len(chunk) {
-				s.queue = s.queue[1:]
+				s.toPump = s.toPump[1:]
 			} else {
-				s.queue[0] = chunk[n:]
+				s.toPump[0] = chunk[n:]
 			}
 			s.mu.Unlock()
 			return n, nil
@@ -57,8 +64,15 @@ func (s *testStream) in(p []byte, abort <-chan struct{}) (int, error) {
 func (s *testStream) out(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.queue = append(s.queue, append([]byte(nil), p...))
+	s.arrived = append(s.arrived, append([]byte(nil), p...))
 	return len(p), nil
+}
+
+// feed 由测试调用：往这条腿的"来流"里放字节，等泵把它搬到对端。
+func (s *testStream) feed(p []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toPump = append(s.toPump, append([]byte(nil), p...))
 }
 
 func (s *testStream) close() {
@@ -78,7 +92,7 @@ func (s *testStream) readQueue() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var all []byte
-	for _, chunk := range s.queue {
+	for _, chunk := range s.arrived {
 		all = append(all, chunk...)
 	}
 	return all
@@ -125,12 +139,8 @@ func TestRelayBridgeV2ForwardsBothDirections(t *testing.T) {
 	legA, legB := newTestStream(), newTestStream()
 	b.startRelay("muxrelay-1-guest-9", "host-chan1", "guest-9", legA.leg(), legB.leg())
 
-	if _, err := legA.out([]byte("handshake")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := legB.out([]byte("login")); err != nil {
-		t.Fatal(err)
-	}
+	legA.feed([]byte("handshake"))
+	legB.feed([]byte("login"))
 	// 首轮搬运单独等，超时就把"泵到底跑没跑"的证据打出来：
 	// 这条用例在 linux runner 上红过一次，只有一句 timeout 的话谁也定位不了（Windows 本机复现不出）。
 	deadline := time.Now().Add(5 * time.Second)
@@ -151,6 +161,16 @@ func TestRelayBridgeV2ForwardsBothDirections(t *testing.T) {
 				sessions, fwd, legA.readQueue(), legB.readQueue(), legA.closeCount(), legB.closeCount())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 到位之后再验一次"没有多余动作"：A 腿只应收到 B 发出的字节，反过来同理。
+	// 泵要是把已经搬走的字节又搬回原腿（自我回环），玩家侧就是重复包/握手两次。
+	time.Sleep(100 * time.Millisecond)
+	if got := string(legA.readQueue()); got != "login" {
+		t.Fatalf("A 腿只该收到 B 的字节，实际 %q", got)
+	}
+	if got := string(legB.readQueue()); got != "handshake" {
+		t.Fatalf("B 腿只该收到 A 的字节，实际 %q", got)
 	}
 
 	// A 方向 EOF → 整个会话收尾，两条腿都被关一次
