@@ -168,6 +168,39 @@ type modSyncFetchResult struct {
 	manifest map[string]any
 }
 
+// modSyncRoomSupportsManifest 门控的前置校验：这间房到底有没有"房主发布的清单"。
+//
+// 位点来源说明（移植纪律）：**模组无此位点**。ModSyncGuestService.gate（:102-136）跑在 MC
+// 进程内，本地 mods 目录与房主清单都在同进程可及之处，"房主开没开上传"只能在拉清单那一步
+// 由服务端回包里的 supported 判出（fetchManifestWithRetry :320-323 → UNSUPPORTED），
+// 模组拉这一次就是必需成本。应用端 MC 在进程外、本地既没有清单也没有房主身份可查，
+// 所以必须自己先问服务端一次，否则 HL/互通镜像房也要先把一轮长轮询请求跑完才被判不支持
+// （玩家实机报的缺陷：互通房弹"必装模组检查"）。
+//
+// 判据复用已有接口与已有字段，不新增服务端接口、不新造判据：
+// 走 App.GetRoomMods 同一个 /room/mods（app.go:1056），读它的 "supported"——
+// 服务端该端点只读房间记录里的 hostCapabilities（modsmanifest.go 的 hostSupportsModSync），
+// 不向房主发信号、不长轮询，与 /room/mods/request 里那句 supported 判定同源同值。
+// HL/镜像房的记录里没有 hostCapabilities（source=happylink 一类字段见 fed_state.go），
+// 因此 supported 恒 false → 前置跳过。
+//
+// 只在服务端**明确**回 supported=false 时才判"不支持"：网络失败/权威错误/空响应
+// 一律返回 true 交给原有取清单路径继续判 —— 门控绝不拦住玩家（本文件类注释 :27-28）。
+func (a *App) modSyncRoomSupportsManifest(roomCode string) bool {
+	data, err := a.modSyncCall("/room/mods", map[string]any{
+		"code": strings.ToUpper(roomCode),
+	}, modSyncFetchPerTry)
+	if err != nil {
+		modSyncLogWarn("gate pre-check inconclusive, keep original flow: {}", err.Error()) // 探测失败不当不支持用
+		return true
+	}
+	if len(data) == 0 {
+		modSyncLogWarn("gate pre-check empty response, keep original flow")
+		return true
+	}
+	return jbool(data, "supported")
+}
+
 // modSyncFetchWithRetry 对应 fetchManifestWithRetry（:281-368）。
 func (a *App) modSyncFetchWithRetry(roomCode, scope string) modSyncFetchResult {
 	sawNotReady := false
@@ -555,6 +588,25 @@ func (a *App) ModSyncGate(reqJSON string) string {
 	}
 
 	scope := modSyncNormalizeScope(req.Scope)
+
+	// 前置校验（模组无此位点，理由见 modSyncRoomSupportsManifest 注释）：
+	// 这间房根本没有房主上传的清单（HL/互通镜像、旧客户端、上传开关关闭）→ 直通，
+	// 不发 /room/mods/request、不走重试预算，提示行与取清单后才判 UNSUPPORTED 那一路同键。
+	// 注意这条**不替代**下面 res.outcome == modSyncFetchUnsupported 分支：
+	// 探测到取清单之间服务端仍可能改口（房主关房/关开关），那条路要留着。
+	if !a.modSyncRoomSupportsManifest(req.Code) {
+		modSyncLogInfo("gate skip: {} (pre-check: host publishes no manifest)", modSyncFetchUnsupported)
+		modSyncSetPendingNote(0, langLogUIModSyncUnsupported)
+		return wrapOK(modSyncGateResponse{
+			Action:      "proceed",
+			Outcome:     modSyncFetchUnsupported,
+			Code:        req.Code,
+			Scope:       scope,
+			PendingNote: &modSyncLangLine{Key: langLogUIModSyncUnsupported},
+			NoteLevel:   0,
+		})
+	}
+
 	modSyncGate.markGated(req.Code)
 
 	// 重置在途提示；gate 入口留痕供真机定谳（:133-135）
