@@ -189,7 +189,8 @@ func TestNatTypeFromSamplesRequiresPublicIPEquality(t *testing.T) {
 		sample []stunMappedAddr
 		want   string
 	}{
-		{"同 IP 同端口", []stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20000)}, "full_cone"},
+		{"同 IP 同端口", []stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20000)}, "port_restricted_cone"},
+		{"混族推不出结论", []stunMappedAddr{sa("1.1.1.1", 20000), sa("2400:320::1", 20000)}, "unknown"},
 		{"同 IP 漂移", []stunMappedAddr{sa("1.1.1.1", 20000), sa("1.1.1.1", 20400)}, "symmetric"},
 		{"异 IP 同端口", []stunMappedAddr{sa("1.1.1.1", 20000), sa("2.2.2.2", 20000)}, "symmetric"},
 		{"单样本", []stunMappedAddr{sa("1.1.1.1", 20000)}, "unknown"},
@@ -201,10 +202,10 @@ func TestNatTypeFromSamplesRequiresPublicIPEquality(t *testing.T) {
 		}
 	}
 	// 无样本才用旧值兜底（有样本时旧值不能盖掉实测结果）
-	if got := natTypeFromSamples(nil, "full_cone"); got != "full_cone" {
+	if got := natTypeFromSamples(nil, "port_restricted_cone"); got != "port_restricted_cone" {
 		t.Errorf("空样本应沿用旧值, got %q", got)
 	}
-	if got := natTypeFromSamples([]stunMappedAddr{sa("1.1.1.1", 20000), sa("2.2.2.2", 20000)}, "full_cone"); got != "symmetric" {
+	if got := natTypeFromSamples([]stunMappedAddr{sa("1.1.1.1", 20000), sa("2.2.2.2", 20000)}, "port_restricted_cone"); got != "symmetric" {
 		t.Errorf("有样本时旧值不该盖掉实测, got %q", got)
 	}
 }

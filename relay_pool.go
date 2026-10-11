@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -89,8 +90,18 @@ func natTypeFromSamples(samples []stunMappedAddr, fallback string) string {
 	// （relaymanager.go:343），于是这台对称 NAT 机器会以"好客"身份被别人选中当中继，
 	// 而它的映射根本收不到别人自外向内的包。
 	a, b := samples[0], samples[len(samples)-1]
+	if strings.Contains(a.IP, ":") != strings.Contains(b.IP, ":") {
+		// 混族（一台服务器给 v4、另一台给 v6）推不出结论，模组的说法是
+		// "mixed IP family, skip symmetric compare"（CM:2225）——既然不比，就不能宣称锥型。
+		return "unknown"
+	}
 	if a.IP == b.IP && stunDeltaFromSamples(samples) == 0 {
-		return "full_cone"
+		// 键名按模组取值：两服务器比对"完全一致"在 StunProbe 里返回的是
+		// PORT_RESTRICTED_CONE（:927-929），"full_cone" 只有走 RFC-5780 change-request
+		// 行为探测才拿得到（:808）。这里没有做那次探测，所以不能冒领 full_cone——
+		// 2026-10-11 生产大厅只读复查也对得上：9 个模组房上报的清一色 port_restricted_cone。
+		// 服务端候选门槛只看"含 sym 的不进池"（relaymanager.go:343），两个键都合格。
+		return "port_restricted_cone"
 	}
 	return "symmetric"
 }
