@@ -86,8 +86,13 @@ func (e modSyncEnv) configured() bool { return e.ModsDir != "" }
 // Java 侧这些都是 static 字段（ModSyncManifestService.java:33-38,105-106 等），
 // 应用同一进程同一时刻只有一个房间会话，单例成立。
 type modSyncState struct {
-	mu       sync.Mutex
-	app      *App
+	mu  sync.Mutex
+	app *App
+	// dir 设置/缓存文件的落盘目录，跟着绑定它的 App.settingsPath 走。
+	// 之前这里恒用 defaultSettingsPath()，于是任何一条 Go 测试只要调一次
+	// SaveModSyncSettings，就会把测试实例写进玩家真实的 %APPDATA%/VoxLinkApp/modsync.json
+	// （本轮就是这么翻车的）。绑定 App 时记下目录，派生文件全部落在同一处。
+	dir      string
 	settings modSyncSettings
 	loaded   bool
 
@@ -115,6 +120,9 @@ func modSyncCurrentApp() *App {
 func (a *App) modSync() *modSyncState {
 	modSyncSvc.mu.Lock()
 	modSyncSvc.app = a
+	if a.settingsPath != "" {
+		modSyncSvc.dir = filepath.Dir(a.settingsPath)
+	}
 	modSyncSvc.mu.Unlock()
 	modSyncSvc.ensureSettingsLoaded()
 	return modSyncSvc
@@ -129,8 +137,23 @@ func (s *modSyncState) currentApp() *App {
 // ---- 设置持久化 ----
 
 // modSyncSettingsPath = settings.json 同目录的 modsync.json。
+// 保留无参版本给"没有 App 绑定"的场合兜底；有 App 时必须走 settingsFile()。
 func modSyncSettingsPath() string {
-	return filepath.Join(filepath.Dir(defaultSettingsPath()), "modsync.json")
+	return filepath.Join(modSyncBaseDirOf(""), "modsync.json")
+}
+
+// modSyncBaseDirOf 返回派生文件该落在哪个目录：给了目录就用它（测试/绑定 App 的目录），
+// 否则退回用户配置目录。
+func modSyncBaseDirOf(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	return filepath.Dir(defaultSettingsPath())
+}
+
+// settingsFile 读本状态绑定的 App 目录下的 modsync.json（调用方须持 s.mu）。
+func (s *modSyncState) settingsFile() string {
+	return filepath.Join(modSyncBaseDirOf(s.dir), "modsync.json")
 }
 
 func (s *modSyncState) ensureSettingsLoaded() {
@@ -145,7 +168,7 @@ func (s *modSyncState) ensureSettingsLoaded() {
 
 func (s *modSyncState) readSettingsLocked() modSyncSettings {
 	def := defaultModSyncSettings()
-	data, err := os.ReadFile(modSyncSettingsPath())
+	data, err := os.ReadFile(s.settingsFile())
 	if err != nil {
 		return def
 	}
@@ -183,10 +206,11 @@ func (s *modSyncState) saveSettings(st modSyncSettings) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(modSyncSettingsPath()), 0o755); err != nil {
+	file := s.settingsFile()
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(modSyncSettingsPath(), data, 0o644)
+	return os.WriteFile(file, data, 0o644)
 }
 
 func (s *modSyncState) snapshotSettings() modSyncSettings {
@@ -224,11 +248,12 @@ func (s *modSyncState) env() modSyncEnv {
 	s.mu.Lock()
 	ov := s.envOverride
 	st := s.settings
+	dir := s.dir
 	s.mu.Unlock()
 	if ov != nil {
 		e := *ov
 		if e.CacheFile == "" {
-			e.CacheFile = modSyncCacheFileFor(e.ModsDir, st.ActiveInstance)
+			e.CacheFile = modSyncCacheFileForDir(dir, e.ModsDir, st.ActiveInstance)
 		}
 		return e
 	}
@@ -246,7 +271,7 @@ func (s *modSyncState) env() modSyncEnv {
 		Loader:      loader,
 		GameVersion: strings.TrimSpace(ins.GameVersion),
 		ModsDir:     modsDir,
-		CacheFile:   modSyncCacheFileFor(modsDir, ins.Name),
+		CacheFile:   modSyncCacheFileForDir(s.dir, modsDir, ins.Name),
 	}
 }
 
@@ -271,6 +296,12 @@ func (s *modSyncState) activeInstance() (modSyncInstance, bool) {
 // gameDir/voxlink/modsync_cache.json。mods 目录按启动器惯例是 gameDir/mods，
 // 因此 base=="mods" 时取父目录当 gameDir；否则退回应用配置目录（不污染用户目录树）。
 func modSyncCacheFileFor(modsDir, instanceName string) string {
+	return modSyncCacheFileForDir("", modsDir, instanceName)
+}
+
+// modSyncCacheFileForDir 同 modSyncCacheFileFor，但"退回应用配置目录"那一支用传入的
+// baseDir（= 绑定 App 的 settingsPath 目录），测试因此不会往玩家目录写缓存。
+func modSyncCacheFileForDir(baseDir, modsDir, instanceName string) string {
 	if modsDir != "" && strings.EqualFold(filepath.Base(modsDir), "mods") {
 		return filepath.Join(filepath.Dir(modsDir), "voxlink", "modsync_cache.json")
 	}
@@ -278,7 +309,7 @@ func modSyncCacheFileFor(modsDir, instanceName string) string {
 	if instanceName != "" {
 		name = "modsync_cache_" + modSyncSafeName(instanceName) + ".json"
 	}
-	return filepath.Join(filepath.Dir(defaultSettingsPath()), name)
+	return filepath.Join(modSyncBaseDirOf(baseDir), name)
 }
 
 // modSyncSafeName 只留 [A-Za-z0-9_-]，其余换成 '-'，供缓存文件名使用。

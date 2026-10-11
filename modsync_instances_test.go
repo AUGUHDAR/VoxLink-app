@@ -8,7 +8,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -100,4 +102,30 @@ func jsonOK(t *testing.T, s string) bool {
 	}
 	ok, _ := m["ok"].(bool)
 	return ok
+}
+
+// 测试卫生：modsync 的设置与缓存文件必须跟着 App.settingsPath 走。
+// 本轮翻车现场：一条 Go 测试调 SaveModSyncSettings，就把 "ok" 这个假实例
+// 写进了玩家真实的 %APPDATA%/VoxLinkApp/modsync.json（因为路径恒取 defaultSettingsPath()）。
+func TestModSyncFilesFollowAppSettingsDir(t *testing.T) {
+	dir := t.TempDir()
+	a := NewApp()
+	a.settingsPath = filepath.Join(dir, "settings.json")
+
+	if !jsonOK(t, a.SaveModSyncSettings(`{"instances":[{"name":"隔离实例","loader":"fabric",
+		"gameVersion":"1.20.1","modsDir":"`+filepath.ToSlash(dir)+`/mods"}],
+		"activeInstance":"隔离实例","joinRequiredModsCheck":true,"hostModSyncPublish":true}`)) {
+		t.Fatal("SaveModSyncSettings 失败")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "modsync.json")); err != nil {
+		t.Fatalf("modsync.json 没落在 App 的 settingsPath 同目录：%v", err)
+	}
+	// 缓存文件同理：mods 目录不是 .../mods 时退回"应用配置目录"，那个目录也必须是 App 的
+	cache := modSyncCacheFileForDir(dir, "", "隔离实例")
+	if !strings.HasPrefix(strings.ToLower(filepath.ToSlash(cache)), strings.ToLower(filepath.ToSlash(dir))) {
+		t.Errorf("缓存文件跑到 App 目录外了：%s", cache)
+	}
+	if got := modSyncSvc.dir; got != dir {
+		t.Errorf("绑定目录没跟随 App.settingsPath：%q", got)
+	}
 }
