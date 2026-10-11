@@ -183,17 +183,27 @@
     return html;
   }
 
-  // 一个实例一行。data-orig 记住它进页面时的名字：activeInstance 是按名字引用的，
-  // 改名时要靠这个对上，才知道「正在使用」要不要跟着搬走。
+  // 一个实例一行，**默认折叠**：展开时四组字段把整页撑得老长，右侧还全是空白，
+  // 玩家只想删一个实例也得先滚过别人的一整屏。折叠后一行只占一行。
+  // data-orig 记住它进页面时的名字：activeInstance 按名字引用，改名时靠这个对上，
+  // 才知道「正在使用」那枚标记要不要跟着搬走。
   function rowHtml(it, i, isActive) {
     var idp = "set-msi-i" + i + "-";
     var sub = [it.loader, it.gameVersion].filter(Boolean).join(" · ");
     return '<div class="field msi-item" data-orig="' + VL.esc(it.name) + '">' +
-      '<div class="card-head">' +
-        '<span class="card-title">' + VL.esc(VL.t("voxlink.app.ms.index", "实例 %s", i + 1)) + "</span>" +
+      '<div class="card-head msi-head" data-toggle>' +
+        '<span class="msi-caret" aria-hidden="true"></span>' +
+        '<span class="card-title">' + VL.esc(it.name || VL.t("voxlink.app.ms.unnamed", "（未命名）")) + "</span>" +
         (isActive ? '<span class="pill pill-accent">' + VL.esc(VL.t("voxlink.app.ms.in_use", "正在使用")) + "</span>" : "") +
         '<span class="card-count">' + VL.esc(sub) + "</span>" +
+        '<span class="msi-acts">' +
+          '<button type="button" class="btn btn-ghost btn-sm" data-act="use"' + (isActive ? " disabled" : "") + ">" +
+          VL.esc(VL.t("voxlink.app.ms.use", "设为当前")) + "</button>" +
+          '<button type="button" class="btn btn-danger btn-sm" data-act="del">' +
+          VL.esc(VL.t("voxlink.app.create.delete", "删除")) + "</button>" +
+        "</span>" +
       "</div>" +
+      '<div class="msi-fields">' +
       '<div class="field-row">' +
         '<div class="field">' +
           '<label class="field-label" for="' + idp + 'name">' + VL.esc(VL.t("voxlink.app.ms.instance_name", "实例名")) + "</label>" +
@@ -207,11 +217,13 @@
       "</div>" +
       '<div class="field">' +
         '<label class="field-label" for="' + idp + 'dir">' + VL.esc(VL.t("voxlink.app.ms.mods_dir", "mods 目录")) + "</label>" +
+        '<div class="msi-dir">' +
         '<input type="text" class="input" id="' + idp + 'dir" data-f="dir" autocomplete="off" ' +
         'value="' + VL.esc(it.modsDir) + '">' +
         '<button type="button" class="btn btn-ghost btn-sm" data-browse-dir title="' +
         VL.esc(VL.t("voxlink.app.ms.browse_title", "从磁盘选目录")) + '">' +
         VL.esc(VL.t("voxlink.app.modsync.browse", "浏览")) + "</button>" +
+        "</div>" +
       "</div>" +
       '<div class="field-row">' +
         '<div class="field">' +
@@ -219,12 +231,7 @@
           '<input type="text" class="input" id="' + idp + 'gv" data-f="gv" maxlength="16" ' +
           'autocomplete="off" value="' + VL.esc(it.gameVersion) + '">' +
         "</div>" +
-        '<div class="field ms-actions">' +
-          '<button type="button" class="btn btn-ghost btn-sm" data-act="use"' + (isActive ? " disabled" : "") + ">" +
-          VL.esc(VL.t("voxlink.app.ms.use", "设为当前")) + "</button>" +
-          '<button type="button" class="btn btn-danger btn-sm" data-act="del">' +
-          VL.esc(VL.t("voxlink.app.create.delete", "删除")) + "</button>" +
-        "</div>" +
+      "</div>" +
       "</div>" +
     "</div>";
   }
@@ -243,6 +250,17 @@
     var html = "";
     list.forEach(function (it, i) { html += rowHtml(it, i, !!it.name && it.name === active); });
     els.list.innerHTML = html;
+  // 折叠：点行头展开/收起。行头里「设为当前 / 删除」也是可点的，不能让它们顺手把行折叠上。
+  if (!els.list.dataset.toggleBound) {
+    els.list.dataset.toggleBound = "1";
+    els.list.addEventListener("click", function (ev) {
+      if (ev.target.closest("[data-act]")) return;
+      var head = ev.target.closest("[data-toggle]");
+      if (!head) return;
+      var row = head.closest(".msi-item");
+      if (row) row.classList.toggle("open");
+    });
+  }
   }
 
   function fieldValue(row, key) {

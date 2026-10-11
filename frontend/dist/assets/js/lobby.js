@@ -173,7 +173,7 @@
       rooms = rooms.filter(function (r) { return r.source !== "happylink"; });
     }
     if (state.version) {
-      rooms = rooms.filter(function (r) { return versionValueOf(r.gameVersion) === state.version; });
+      rooms = rooms.filter(function (r) { return versionMatches(r.gameVersion, state.version); });
     }
     return rooms;
   }
@@ -190,59 +190,32 @@
   // 不给候选项就永远筛不到它们；把它们混进真实版本又会破坏"某版本"筛选的准确性。
   var VERSION_NONE = "__none__";
 
-  // 原始写法（已去首尾空格）；空或 unknown 返回 VERSION_NONE
-  function versionLabelOf(v) {
-    var s = String(v == null ? "" : v).trim();
-    if (!s || s.toLowerCase() === "unknown") return VERSION_NONE;
-    return s;
+  // 版本筛选做成输入框，与网页端一致：输 "1.20" 要能命中 "1.20.1"（网页端判据
+  // rv === v || rv.startsWith(v + ".")，小写比较），做成下拉就只能整版本精确选，
+  // 玩家想"看所有 1.20.x"就点不出来。
+  function versionMatches(roomVersion, query) {
+    var rv = String(roomVersion == null ? "" : roomVersion).trim().toLowerCase();
+    var q = query.trim().toLowerCase();
+    if (!q) return true;
+    return rv === q || rv.indexOf(q + ".") === 0;
   }
 
-  // option value：小写化的语义键，同一版本的不同大小写写法落到同一个值
-  function versionValueOf(v) {
-    var label = versionLabelOf(v);
-    return label === VERSION_NONE ? VERSION_NONE : label.toLowerCase();
-  }
-
-  // 动态创建下拉，插到分类下拉右侧（同一 toolbar 行内），省掉改 index.html
+  // 动态创建输入框，插到分类下拉右侧（同一 toolbar 行内），省掉改 index.html
   function ensureVersionFilter() {
     els.version = VL.$("#lobby-version");
     if (els.version) return;
     if (!els.category || !els.category.parentNode) return;
-    var sel = document.createElement("select");
-    sel.className = "select";
-    sel.id = "lobby-version";
-    sel.title = VL.t("voxlink.app.lobby.version_title", "按 Minecraft 版本筛选（只影响当前这一页显示，不改服务端查询）");
-    sel.innerHTML = '<option value="">' + VL.esc(VL.t("voxlink.app.lobby.version_all", "全部版本")) + "</option>";
-    els.category.parentNode.insertBefore(sel, els.category.nextSibling);
-    els.version = sel;
-  }
-
-  // 每次取回列表后重建候选；当前选中项在新候选里不存在时回落"全部版本"
-  function renderVersionOptions() {
-    if (!els.version) return;
-    var seen = {};
-    var opts = [];
-    var hasNone = false;
-    (state.rooms || []).forEach(function (r) {
-      var value = versionValueOf(r.gameVersion);
-      if (value === VERSION_NONE) { hasNone = true; return; }
-      if (seen[value]) return;
-      seen[value] = true;
-      opts.push({ value: value, label: versionLabelOf(r.gameVersion) });
-    });
-    var html = '<option value="">' + VL.esc(VL.t("voxlink.app.lobby.version_all", "全部版本")) + "</option>";
-    opts.forEach(function (o) {
-      html += '<option value="' + VL.esc(o.value) + '">' + VL.esc(o.label) + "</option>";
-    });
-    if (hasNone) {
-      html += '<option value="' + VERSION_NONE + '">' +
-        VL.esc(VL.t("voxlink.app.lobby.version_none", "未指定")) + "</option>";
-    }
-    var exists = state.version === "" ||
-      (state.version === VERSION_NONE ? hasNone : !!seen[state.version]);
-    if (!exists) state.version = "";
-    els.version.innerHTML = html;
-    els.version.value = state.version;
+    var inp = document.createElement("input");
+    inp.type = "text";
+    inp.className = "input";
+    inp.id = "lobby-version";
+    inp.maxLength = 16;
+    inp.autocomplete = "off";
+    inp.placeholder = VL.t("voxlink.app.lobby.version_ph", "版本");
+    inp.title = VL.t("voxlink.app.lobby.version_title", "按 Minecraft 版本筛选，输 1.20 可命中 1.20.1");
+    inp.value = state.version || "";
+    els.category.parentNode.insertBefore(inp, els.category.nextSibling);
+    els.version = inp;
   }
 
   function render() {
@@ -313,7 +286,6 @@
       VL.toast(VL.errText(e), "error");
     }
     state.loading = false;
-    renderVersionOptions();
     render();
   }
 
@@ -417,7 +389,7 @@
     });
 
     if (els.version) {
-      els.version.addEventListener("change", function () {
+      els.version.addEventListener("input", function () {
         state.version = els.version.value;
         // 纯前端过滤当前这一页：不发请求、不重置页码（与排除 Happy Link 开关同一口径）
         render();
@@ -470,7 +442,6 @@
     // 不重发 ListRooms（卡片内容没变，重发会打断玩家正在看的分页位置），IP 那行本来就会被后端缓存。
     VL.onLangChange(function () {
       refreshOptionLabels();
-      renderVersionOptions();
       render();
       loadIp();
     });

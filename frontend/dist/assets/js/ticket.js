@@ -57,7 +57,7 @@
     for (var i = 0; i < list.length; i++) {
       parts.push(VL.esc(list[i].name || VL.t("voxlink.app.ticket.attachment", "附件")) + " · " + fmtSize(list[i].size));
     }
-    return '<div class="ticket-msg-meta">' + VL.esc(VL.t("voxlink.app.ticket.attach_label", "附件：")) +
+    return '<div class="ticket-msg-meta">' + VL.esc(VL.t("voxlink.ticket.attach_prefix", "附件：")) +
       parts.join("　") + "</div>";
   }
 

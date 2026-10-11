@@ -329,7 +329,26 @@ html[data-theme="dark"] .brand-logo {
 .btn-block { width: 100%; }
 
 /* ============ 表单 ============ */
-.form-card { max-width: 560px; }
+/* 设置页两张卡（偏好 + 实例管理）并排看更顺眼，也免得右边空一片：
+   窄窗口自动退成一列，宽窗口各占一半。 */
+.page-settings .form-card { max-width: none; }
+.settings-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: var(--sp-4); align-items: start; }
+.settings-cards .form-card { margin-bottom: 0; }
+
+/* 大厅的版本筛选是输入框：不给宽度会吃掉整行（.input 默认 100%），和分类下拉挤不成一行 */
+#lobby-version { flex: 0 0 160px; width: 160px; }
+
+/* MC 实例管理：默认折叠成一行，点行头展开编辑 */
+.msi-item { border-top: 1px solid var(--border); padding-top: var(--sp-3); }
+.msi-head { cursor: pointer; align-items: center; gap: var(--sp-3); }
+.msi-caret { width: 0; height: 0; border-left: 5px solid var(--text-faint); border-top: 4px solid transparent; border-bottom: 4px solid transparent; flex: 0 0 auto; transition: transform .12s ease; }
+.msi-item.open .msi-caret { transform: rotate(90deg); }
+.msi-fields { display: none; padding-top: var(--sp-3); }
+.msi-item.open .msi-fields { display: block; }
+.msi-acts { margin-left: auto; display: flex; gap: var(--sp-2); flex: 0 0 auto; }
+.msi-dir { display: flex; gap: var(--sp-2); align-items: stretch; }
+.msi-dir .input { flex: 1 1 auto; min-width: 0; }
+.msi-dir .btn { flex: 0 0 auto; }
 .field { margin-bottom: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
 /* 建房页"新建实例"里那两个按钮：跟同一行的输入框底部对齐，别顶在格子上 */
