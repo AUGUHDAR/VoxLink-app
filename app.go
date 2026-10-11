@@ -20,7 +20,11 @@ import (
 const (
 	appVersion       = "1.2.0-beta"
 	defaultServerURL = "https://p2p.wuhui.icu"
-	// clientProtocolVersion 上报给服务端的客户端协议号（模组 VoxLinkConstants.PROTOCOL_VERSION 同义）。
+	// clientProtocolVersion 是信令体里的客户端协议号，模组在 SignalingClient.java:199/284
+	// 两处硬编码发 7（语义即 ProtocolNegotiator.PROTOCOL_VERSION_7），服务端用 ">0" 当
+	// "新客户端"标记（roommanager.go:882）。
+	// 别把它和 VoxLinkConstants.PROTOCOL_VERSION 混为一谈——那个是 Minecraft 协议号
+	// （1.20.1→763），只用于 CM:1731 的版本观测日志，不在这条线上。
 	clientProtocolVersion = 7
 )
 
