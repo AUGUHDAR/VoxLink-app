@@ -72,6 +72,8 @@ type session struct {
 	wsNextRetryAt atomic.Int64
 	// wsBackoffStep 退避档位游标，拨号成功清零（Java:85 backoffStep，onConnected :346）。
 	wsBackoffStep atomic.Int64
+	pollFails     int       // HTTP 轮询连续失败次数（退避与"已恢复"日志口径）
+	wsSafetyOnce  sync.Once // WS 安全网补拉只起一条 goroutine（会话级）
 	// wsDead 当前连接的判死信号（看门狗/主动 ping 失败/写失败关闭它 → wsLoop 立即返回触发重连）。
 	wsDead chan struct{}
 	// wsKill 关闭 wsDead（幂等，每连接一个 sync.Once）。
@@ -258,6 +260,7 @@ func (s *session) heartbeatLoop() {
 // 等待窗口内以 HTTP 逐请求兜底（等价 Java canUse()=false 时 SignalingClient 直落 HTTP）。
 func (s *session) signalLoop() {
 	s.since.Store(time.Now().UnixMilli() - 30_000)
+	s.startWSSafetyNet()
 
 	for {
 		if s.isDone() {
@@ -279,6 +282,37 @@ func (s *session) signalLoop() {
 		}
 		s.app.netLog("info", "ws_reconnect_attempt")
 	}
+}
+
+// wsSafetyNetEvery 模组 WS 健康时的补拉周期：RoomManager.java:1829-1841 把轮询间隔在 WS
+// 健康时放宽到 5s，:1700-1710 再"睡 5 拍、第 6 拍补一次"，合起来 30s 一次 HTTP 兜底。
+var wsSafetyNetEvery = 30 * time.Second
+
+// startWSSafetyNet WS 健康时的安全网补拉。推送是实时通道，但"连接看着活着、帧不再到达"
+// 的半开黑洞只能靠这一条兜住——应用端此前 WS 一在线就完全不跑 HTTP 轮询，
+// 推送一漏就永久卡住（隔离装置里复现的正是这个形态）。
+func (s *session) startWSSafetyNet() {
+	s.wsSafetyOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(wsSafetyNetEvery)
+			defer t.Stop()
+			for {
+				select {
+				case <-s.done:
+					return
+				case <-s.stopCh:
+					return
+				case <-t.C:
+					if !s.wsCanUse() {
+						continue // WS 不在时由 httpPollLoop 兜底，这里不重复打服务端
+					}
+					if done, _ := s.httpPollOnce(); done {
+						return
+					}
+				}
+			}
+		}()
+	})
 }
 
 // wsNextRetryDelay 距退避窗口打开还需等待的时间；0 表示可立即重连
@@ -337,7 +371,6 @@ func (s *session) httpPollLoop(maxWait time.Duration) bool {
 	timer := time.NewTimer(maxWait)
 	defer timer.Stop()
 	interval := httpPollInterval
-	fails := 0
 
 	for {
 		select {
@@ -350,44 +383,58 @@ func (s *session) httpPollLoop(maxWait time.Duration) bool {
 		case <-time.After(interval):
 		}
 
-		body := map[string]any{
-			"code":   s.code,
-			"token":  s.token,
-			"isHost": s.isHost,
-			"since":  s.since.Load(),
+		done, failed := s.httpPollOnce()
+		if done {
+			return true
 		}
-		var sd signalsData
-		err := s.app.api.post(s.app.baseURL(), "/signal/poll", body, &sd)
-		if err != nil {
-			var ae *APIError
-			if errors.As(err, &ae) {
-				if ae.Status == http.StatusGone || isFatalAuthError(ae.Code) {
-					msg := ae.Message
-					if msg == "" {
-						msg = "房间已失效"
-					}
-					s.fatal(msg)
-					return true
-				}
-			}
-			fails++
-			if fails == 1 || fails%maxPollFailures == 0 {
-				s.app.netLog("warn", fmt.Sprintf("信令轮询失败(%d 次)，继续重试: %v", fails, err))
-			}
+		if failed {
 			// 连续失败逐步退避（1s→2s→4s…上限 10s），避免网络全断时空转打服务端
-			interval = httpPollInterval << min(fails-1, 3)
+			interval = httpPollInterval << min(s.pollFails-1, 3)
 			if interval > 10*time.Second {
 				interval = 10 * time.Second
 			}
 			continue
 		}
-		if fails >= maxPollFailures {
-			s.app.netLog("info", fmt.Sprintf("信令轮询已恢复（中断 %d 次）", fails))
-		}
-		fails = 0
 		interval = httpPollInterval
-		s.handleSignals(sd)
 	}
+}
+
+// httpPollOnce 一次 HTTP /signal/poll。done=会话应结束（410/致命鉴权），failed=这次网络失败
+// （由调用方决定退避）。从 httpPollLoop 里抽出来，是为了让"WS 健康时的安全网补拉"
+// 复用同一条口径（见 startWSSafetyNet）。
+func (s *session) httpPollOnce() (done bool, failed bool) {
+	body := map[string]any{
+		"code":   s.code,
+		"token":  s.token,
+		"isHost": s.isHost,
+		"since":  s.since.Load(),
+	}
+	var sd signalsData
+	err := s.app.api.post(s.app.baseURL(), "/signal/poll", body, &sd)
+	if err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) {
+			if ae.Status == http.StatusGone || isFatalAuthError(ae.Code) {
+				msg := ae.Message
+				if msg == "" {
+					msg = "房间已失效"
+				}
+				s.fatal(msg)
+				return true, false
+			}
+		}
+		s.pollFails++
+		if s.pollFails == 1 || s.pollFails%maxPollFailures == 0 {
+			s.app.netLog("warn", fmt.Sprintf("信令轮询失败(%d 次)，继续重试: %v", s.pollFails, err))
+		}
+		return false, true
+	}
+	if s.pollFails >= maxPollFailures {
+		s.app.netLog("info", fmt.Sprintf("信令轮询已恢复（中断 %d 次）", s.pollFails))
+	}
+	s.pollFails = 0
+	s.handleSignals(sd)
+	return false, false
 }
 
 // handleSignals 分发信令并推进 since 游标（同时交给连接引擎处理）。
