@@ -13,12 +13,15 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"hash/crc32"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -665,4 +668,37 @@ func io_ReadFull(c net.Conn, buf []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+// 认证降级的开关只能出现在 TURN 那一处（本轮审计 F 条：直连 P2P 两处误传了 true）。
+// 这条不验行为（行为上面已经钉住了），验的是"以后有人新加调用点时又顺手传了 true"——
+// 这类缺陷正是从调用点渗回来的，而调用点散落在打洞/TURN 两条流程里，靠人记不住。
+func TestAuthDowngradeFlagOnlyEnabledInTurnFlow(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var offenders []string
+	for _, ent := range entries {
+		name := ent.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if name == "rudp.go" { // 定义处
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if strings.Contains(line, "setAuthKey(") && strings.Contains(line, ", true)") && name != "turn_flow.go" {
+				offenders = append(offenders, fmt.Sprintf("%s:%d: %s", name, i+1, strings.TrimSpace(line)))
+			}
+		}
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("认证降级(allowDowngrade=true)只能由 TURN 流程开启，出现了新调用点：\n%s",
+			strings.Join(offenders, "\n"))
+	}
 }

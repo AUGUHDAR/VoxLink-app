@@ -1088,7 +1088,11 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 
 			rc := newRudp(winConn, actual)
 			if authKey != nil {
-				rc.setAuthKey(authKey, true)
+				// 直连路径绝不开认证降级（ReliableUdpTransport.java:366-369 的注释就是规则本身：
+				// "仅 TURN 路径开启…直连 P2P 路径保持严格认证不受影响"）。
+				// 降级后源地址重绑仍生效，等于让"能往这个已打洞 UDP 口塞 3 个伪造包的人"
+				// 永久解除本端认证。
+				rc.setAuthKey(authKey, false)
 			}
 			rc.setOnRestart(func() { e.guestIceRestart() })
 			// 玩家中继 v2：双方都声明 relayMuxV1 才 mux 化，且必须在 Start 之前（模组 RUDP:160）。
@@ -1649,7 +1653,7 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 			}
 			rc := newRudp(winConn, actual)
 			if authKey != nil {
-				rc.setAuthKey(authKey, true)
+				rc.setAuthKey(authKey, false) // 同 guest 侧：降级只属于 TURN 路径
 			}
 			rc.setOnRestart(func() {
 				e.app.netLog("warn", "host 侧收到 ICE 重启请求，重新协商该房客")

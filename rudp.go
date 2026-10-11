@@ -382,8 +382,9 @@ func (c *rudpConn) setOnRestart(fn func()) { c.onRestart = fn }
 // setCodec 设置路径包封编解码器（须在 Start 前调用；nil=直连裸跑）。
 func (c *rudpConn) setCodec(pc rudpPathCodec) { c.codec = pc }
 
-// setAuthKey 启用 punchAuthV1 帧认证；allowDowngrade=true 时对端连续 3 帧未认证
-// 自动回明文（旧引擎互操作，实证：host armed 而对端明文会互丢致死）。
+// setAuthKey 启用 punchAuthV1 帧认证。allowDowngrade 只允许 TURN 那四条传输传 true
+// （模组 ReliableUdpTransport.java:366-369：连续 3 帧未认证才回明文，供旧 TURN 服务端互操作；
+// 直连 P2P 保持严格认证——它的源地址重绑只在裸跑路径生效，降级会被伪造包利用）。
 func (c *rudpConn) setAuthKey(key []byte, allowDowngrade bool) {
 	c.authMu.Lock()
 	if key == nil {
