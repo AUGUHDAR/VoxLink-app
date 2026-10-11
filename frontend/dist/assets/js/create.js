@@ -197,19 +197,22 @@
   // 0 个：中性提示；≥1 个：绿字提示，多个时旁挂一个只列端口的下拉
   function renderPortState() {
     if (!els.portSelect) return;
+    // 只要检测到了，就必须把结果**填进输入框**：早先只有"检测到多个"那条分支才回填，
+    // 单个端口时框里还停在 25565、提示却写着"已检测到 65239，请确认"——没有可确认的东西，
+    // 玩家就这么建房，房间就开在一个没人监听的端口上，对端隧道打通了也连不进去。
+    var cur = parseInt(els.port.value, 10);
+    var has = detectedPorts.some(function (p) { return p.port === cur; });
+    if (detectedPorts.length && !has) {
+      els.port.value = detectedPorts[0].port;
+      cur = detectedPorts[0].port;
+    }
     if (detectedPorts.length > 1) {
       var opts = "";
-      detectedPorts.forEach(function (p, i) {
+      detectedPorts.forEach(function (p) {
         opts += '<option value="' + VL.esc(p.port) + '">' + VL.esc(p.port) + "</option>";
       });
       els.portSelect.innerHTML = opts;
-      // 当前端口若不在检测结果里 → 选第一个
-      var cur = parseInt(els.port.value, 10);
-      var has = detectedPorts.some(function (p) { return p.port === cur; });
-      if (!has) {
-        els.port.value = detectedPorts[0].port;
-      }
-      els.portSelect.value = els.port.value;
+      els.portSelect.value = String(els.port.value);
       els.portSelect.classList.remove("hidden");
     } else {
       els.portSelect.classList.add("hidden");
@@ -219,9 +222,9 @@
     if (!detectedPorts.length) {
       setPortHint("neutral", "未检测到正在运行的 MC，请手动输入端口");
     } else if (detectedPorts.length === 1) {
-      setPortHint("ok", "已检测到 MC 端口 " + detectedPorts[0].port + "，请确认");
+      setPortHint("ok", "已填入检测到的 MC 端口 " + detectedPorts[0].port + "，不对请手动改");
     } else {
-      setPortHint("ok", "检测到 " + detectedPorts.length + " 个 MC 端口，已自动选用第一个，请确认");
+      setPortHint("ok", "检测到 " + detectedPorts.length + " 个 MC 端口，已选用第一个，可在旁边下拉里换");
     }
   }
 

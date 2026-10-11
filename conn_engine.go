@@ -1140,7 +1140,7 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 				return
 			}
 			rc.Start()
-			_, bridge, berr := startGuestBridge(rc, func() { e.guestBridgeDown() })
+			bridgeAddr, bridge, berr := startGuestBridge(rc, func() { e.guestBridgeDown() })
 			if berr != nil {
 				p.cancel()
 				_ = rc.Close()
@@ -1172,8 +1172,11 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 				_ = sock.Close()
 			}
 			e.app.netLog("info", "P2P 打洞成功，rudp 隧道已建立")
-			directAddr := net.JoinHostPort(hostIp, strconv.Itoa(hostPort))
-			e.notifyState(phaseP2P, statusSuccess, directAddr, "")
+			// 成功卡上的地址必须是**本机桥接口**，不能是房主的 hostIp:hostPort：
+			// 模组里 MC 在进程内，它的连接会被模组钩住再转隧道，所以能给房主地址；
+			// 应用端 MC 是独立进程，它只会照着地址真连公网 —— 打不通，表现就是
+			// "连接已打通"而 MC 报 Connection timed out: getsockopt。
+			e.notifyState(phaseP2P, statusSuccess, bridgeAddr, "")
 			return
 		}
 
