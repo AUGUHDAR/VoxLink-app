@@ -171,6 +171,23 @@ func (a *App) Shutdown() {
 
 // ---- 事件辅助 ----
 
+// SelectModsDir 给界面层的"浏览…"用：弹出系统目录选择框，返回 {path}。
+// 取消、或当前构建没有对话框能力（CLI）时返回空串，前端据此保持原值不动。
+func (a *App) SelectModsDir() string {
+	a.mu.Lock()
+	p := a.picker
+	a.mu.Unlock()
+	dp, ok := p.(dirPicker)
+	if !ok || p == nil {
+		return wrapOK(map[string]any{"path": ""})
+	}
+	dir, err := dp.PickDir("选择 mods 目录")
+	if err != nil || strings.TrimSpace(dir) == "" {
+		return wrapOK(map[string]any{"path": ""})
+	}
+	return wrapOK(map[string]any{"path": filepath.ToSlash(strings.TrimSpace(dir))})
+}
+
 // emit 把事件交给当前 sink（未注入时静默丢弃，便于测试与无头调用）。
 func (a *App) emit(event string, data any) {
 	a.mu.Lock()

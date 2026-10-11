@@ -41,6 +41,15 @@ func (p wailsPicker) PickFiles(title string, filters []pickFilter) ([]string, er
 	return wailsrt.OpenMultipleFilesDialog(p.ctx, opts)
 }
 
+// PickDir 系统目录选择框（mods 目录、实例目录用）。工单附件只要文件，
+// 目录这一档只有界面层用得到，所以单独一个方法，不塞进 filePicker 的必选契约。
+func (p wailsPicker) PickDir(title string) (string, error) {
+	if p.ctx == nil {
+		return "", fmt.Errorf("窗口尚未就绪，无法打开目录对话框")
+	}
+	return wailsrt.OpenDirectoryDialog(p.ctx, wailsrt.OpenDialogOptions{Title: title})
+}
+
 // startup 由 Wails OnStartup 调用：先接上事件出口，再加载设置
 // （loadSettings 期间若有日志要出口，此时 sink 已就位）。
 func (a *App) startup(ctx context.Context) {

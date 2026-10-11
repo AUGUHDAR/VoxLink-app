@@ -4,7 +4,7 @@
  * 模组同步（ModSync）的应用端界面层：Java 侧 ModSyncSelectScreen /
  * ModSyncRestartScreen / 配置开关的 HTML 等价物。
  * 后端逻辑全在 modsync_*.go，这里只负责：
- *   1) 加入前门控（scope 选择 → checking → 差异卡片 → 下载/直接加入）
+ *   1) 加入前门控（选实例 + scope 选择 → checking → 差异卡片 → 下载/直接加入）
  *   2) 下载进度与"需重启实例"屏
  *   3) 房主侧清单面板（实例状态 / 重建 / 上报开关）
  *   4) 设置页的 MC 实例与两个开关
@@ -82,7 +82,21 @@
     "voxlink.app.modsync.rebuild": "重建并上报清单",
     "voxlink.app.modsync.not_configured": "未配置 MC 实例：已跳过模组同步",
     "voxlink.app.modsync.join_cancelled": "已取消加入（模组检查页返回）",
-    "voxlink.app.modsync.restart_app_hint": "请在关闭 Minecraft 后重新启动它，新模组装载后才生效。"
+    "voxlink.app.modsync.restart_app_hint": "请在关闭 Minecraft 后重新启动它，新模组装载后才生效。",
+    // 加入侧「选实例」那一步（只加入、从不建房的玩家也得能选定往哪装模组）
+    "voxlink.app.modsync.pick_instance": "模组装到哪个实例？",
+    "voxlink.app.modsync.pick_instance_hint": "比对本端模组、写下载文件都只认这一个实例的 mods 目录（加载器 / MC 版本也按它算）",
+    "voxlink.app.modsync.target_dir": "写入目录：%s",
+    "voxlink.app.modsync.target_unnamed": "还没选定实例：本次会用第一个，或自己填一个",
+    "voxlink.app.modsync.no_instance": "还没有任何 MC 实例：填一个 mods 目录，或者点「直接进入」跳过检查",
+    "voxlink.app.modsync.instance_name_ph": "实例名（例如 1.20.1 科技服）",
+    "voxlink.app.modsync.instance_name_default": "MC 实例",
+    "voxlink.app.modsync.browse": "浏览",
+    "voxlink.app.modsync.mods_dir_ph": "mods 目录（例如 C:/Users/You/AppData/Roaming/.minecraft/mods）",
+    "voxlink.app.modsync.gv_ph": "MC 版本（例如 1.20.1，可留空）",
+    "voxlink.app.modsync.mods_dir_hint": "粘贴放 *.jar 的那个 mods 文件夹完整路径即可，之后一直用它",
+    "voxlink.app.modsync.need_dir": "要填 mods 目录才能下载模组；不想装就点「直接进入」",
+    "voxlink.app.modsync.saved_instance": "已保存实例「%s」"
   };
 
   function t(key) {
@@ -105,9 +119,80 @@
 
   /* ---------------- 状态 ---------------- */
   var settings = { configured: false, joinRequiredModsCheck: true, hostModSyncPublish: true };
+  var msView = null;       // GetModSyncSettings 的原始回包（instances / activeInstance / 开关 / 生效四元组）
   var modal = null;        // {root, body}
   var gateState = null;    // 当前门控会话（scope / 分组 / 订阅状态）
   var pendingNote = null;  // 门控直通提示（进房后 flush）
+
+  /* ---------------- 实例数据读写（与 create.js / settings.js 同一份全局设置） ----------------
+   * 实例（name/loader/gameVersion/modsDir）原本只能在「创建房间」页选，只加入不建房
+   * 的玩家因此没有任何实例可用：ModSyncGate 拿默认探测目录做比对、ModSyncDownload
+   * 也往那儿写（后端两个都只读 activeInstance，没有参数可传）。加入侧必须自带一份
+   * 「选实例 / 就地新建」，见下面 askScope。
+   * SaveModSyncSettings 是整体回写：少带任何一个字段就等于把它删掉，
+   * 所以任何写入都先 GetModSyncSettings 读现状再合并（与 create.js 同构）。 */
+  var LOADERS = ["fabric", "forge", "neoforge"];
+
+  function msInstances() {
+    return (msView && msView.instances) || [];
+  }
+
+  function msInstanceByName(name) {
+    if (!name) return null;
+    var list = msInstances();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].name === name) return list[i];
+    }
+    return null;
+  }
+
+  function msLabel(it) {
+    return it ? [it.loader, it.gameVersion].filter(Boolean).join(" · ") : "";
+  }
+
+  function applySettingsView(v) {
+    if (!v) return;
+    msView = v;
+    settings = v;
+  }
+
+  // 现在真正生效的写入目标（后端按 activeInstance 解析，无实例时回落探测到的默认目录）
+  function targetLabel() {
+    var it = msInstanceByName((msView && msView.activeInstance) || "");
+    var dir = (it && it.modsDir) || (msView && msView.modsDir) || "";
+    if (!dir) return "";
+    var name = it ? it.name : "";
+    return t("voxlink.app.modsync.target_dir", name ? name + " · " + dir : dir);
+  }
+
+  function loadSettings() {
+    return rawApi("GetModSyncSettings").then(function (v) {
+      applySettingsView(v);
+    }, function () { /* 后端不可用（浏览器演示模式）：保持上一次读到的现状 */ });
+  }
+
+  // 永不 reject：返回 {ok}，失败原因已经 toast 过，调用方只需决定要不要放行玩家。
+  function saveModSync(patch) {
+    return rawApi("GetModSyncSettings").then(function (cur) {
+      if (cur) applySettingsView(cur);
+      var base = msView || {};
+      var payload = {
+        instances: msInstances(),
+        activeInstance: base.activeInstance || "",
+        joinRequiredModsCheck: !(base.joinRequiredModsCheck === false),
+        hostModSyncPublish: !(base.hostModSyncPublish === false)
+      };
+      Object.keys(patch || {}).forEach(function (k) { payload[k] = patch[k]; });
+      return rawApi("SaveModSyncSettings", JSON.stringify(payload));
+    }).then(function (v) {
+      if (v) applySettingsView(v);
+      return { ok: true };
+    }, function (e) {
+      if (e && e.code === "NO_BACKEND") return { ok: true }; // 没有后端就别拦人
+      if (e) VL.toast(VL.errText(e), "error");
+      return { ok: false };
+    });
+  }
 
   /* ---------------- 通用弹层 ---------------- */
   function ensureModal() {
@@ -197,6 +282,10 @@
     var g = gateState;
     var allScope = g.scope === "all";
     var html = "";
+
+    // 把「装到哪儿」摆在最前面：之前比对完了才知道没处写 / 写错目录，就是因为这一行不存在。
+    var tgt = targetLabel();
+    if (tgt) html += '<div class="modsync-note">' + VL.esc(tgt) + "</div>";
 
     if (g.downloadable.length) {
       html += '<div class="modsync-h">' + VL.esc(
@@ -408,17 +497,131 @@
     return e;
   }
 
-  // scope 选择页（对应 AttemptingJoinScreen 的三个按钮 :154-183,264-318）
+  // scope 选择页（对应 AttemptingJoinScreen 的三个按钮 :154-183,264-318），
+  // 并把「装到哪个实例」并进同一屏 —— 检查之前必须先落定写入目标：
+  //   后端 ModSyncGate（比对用 loader / MC 版本）和 ModSyncDownload（写文件）都只读
+  //   activeInstance 解析出来的那一份 env，不收实例参数，所以只能在这一屏里先把它写对。
+  // 同一屏而不是多开一步的理由：已配置实例的玩家下拉里就预先选中了当前实例，
+  // 点击次数和以前一模一样（没被多问一步）；而没实例的玩家本来就要填目录，
+  // 填完直接点 scope 就走完，拆成两屏反而每人多一次点击。
   function askScope(code) {
-    return new Promise(function (resolve, reject) {
+    return new Promise(function (resolve) {
+      var list = msInstances();
+      var active = (msView && msView.activeInstance) || "";
+      var picked = msInstanceByName(active) ? active : (list.length ? list[0].name : "");
+      var needNew = !list.length;
+
+      function instanceBlock() {
+        var html = '<div class="modsync-h">' + VL.esc(t("voxlink.app.modsync.pick_instance")) + "</div>" +
+          '<div class="modsync-note">' + VL.esc(t("voxlink.app.modsync.pick_instance_hint")) + "</div>";
+        if (needNew) {
+          html += '<div class="modsync-warn">' + VL.esc(t("voxlink.app.modsync.no_instance")) + "</div>" +
+            '<div style="display:flex;gap:8px;margin:6px 0">' +
+            '<input class="input" id="ms-new-name" maxlength="24" style="flex:1 1 55%" placeholder="' +
+            VL.esc(t("voxlink.app.modsync.instance_name_ph")) + '" value="' +
+            VL.esc(t("voxlink.app.modsync.instance_name_default")) + '">' +
+            '<select class="select" id="ms-new-loader" style="flex:1 1 45%">' +
+            LOADERS.map(function (l) { return '<option value="' + l + '">' + l + "</option>"; }).join("") +
+            "</select></div>" +
+            '<div style="margin:6px 0"><input class="input" id="ms-new-dir" style="width:100%" placeholder="' +
+            VL.esc(t("voxlink.app.modsync.mods_dir_ph")) + '" value="' +
+            VL.esc((msView && msView.modsDir) || "") + '">' +
+            '<button type="button" class="btn btn-ghost btn-sm" data-browse-dir>' +
+            VL.esc(t("voxlink.app.modsync.browse")) + "</button></div>" +
+            '<div style="margin:6px 0"><input class="input" id="ms-new-gv" maxlength="16" style="width:100%" placeholder="' +
+            VL.esc(t("voxlink.app.modsync.gv_ph")) + '"></div>' +
+            '<div class="modsync-note">' + VL.esc(t("voxlink.app.modsync.mods_dir_hint")) + "</div>";
+          return html;
+        }
+        return html + '<div style="margin:6px 0"><select class="select" id="ms-inst" style="width:100%">' +
+          list.map(function (it) {
+            return '<option value="' + VL.esc(it.name) + '"' + (it.name === picked ? " selected" : "") + ">" +
+              VL.esc(it.name) + (msLabel(it) ? "（" + VL.esc(msLabel(it)) + "）" : "") + "</option>";
+          }).join("") + "</select>" +
+          '<div class="modsync-note" id="ms-target-note"></div></div>';
+      }
+
+      function val(id) {
+        var el = VL.$(id);
+        return el ? String(el.value || "").trim() : "";
+      }
+
+      function paintTarget() {
+        var note = VL.$("#ms-target-note");
+        if (!note) return;
+        var it = msInstanceByName(picked);
+        note.textContent = (it && it.modsDir)
+          ? t("voxlink.app.modsync.target_dir", it.name + " · " + it.modsDir)
+          : t("voxlink.app.modsync.target_unnamed");
+      }
+
+      function showErr(msg) {
+        var el = VL.$("#ms-inst-err");
+        if (el) el.textContent = msg || "";
+      }
+
+      // 选中的实例就是后端当前生效的那个 → 不必为此回写一次全局设置。
+      // （activeInstance 对不上任何实例时，后端 env() 用的就是 instances[0]，
+      //  所以下拉预选落在第一个并不改变目标。）
+      function alreadyTarget() {
+        if (picked === active) return true;
+        return !msInstanceByName(active) && list.length > 0 && picked === list[0].name;
+      }
+
+      // 把选定的实例落成后端那份 activeInstance；落不成（没填目录 / 保存失败）就留在本页。
+      function ensureTarget() {
+        if (!needNew) {
+          if (alreadyTarget()) return Promise.resolve(true);
+          return saveModSync({ activeInstance: picked }).then(function (r) { return r.ok; });
+        }
+        var dir = val("#ms-new-dir");
+        if (!dir) {
+          showErr(t("voxlink.app.modsync.need_dir"));
+          return Promise.resolve(false);
+        }
+        var name = val("#ms-new-name") || t("voxlink.app.modsync.instance_name_default");
+        var next = msInstances().filter(function (it) { return it.name !== name; });
+        next.push({
+          name: name,
+          loader: val("#ms-new-loader") || "fabric",
+          gameVersion: val("#ms-new-gv").slice(0, 16),
+          modsDir: dir
+        });
+        return saveModSync({ instances: next, activeInstance: name }).then(function (r) {
+          if (!r.ok) return false;
+          needNew = false;
+          active = name;
+          picked = name;
+          VL.toast(t("voxlink.app.modsync.saved_instance", name), "success");
+          return true;
+        });
+      }
+
+      function choose(scope) {
+        showErr("");
+        ensureTarget().then(function (ok) {
+          if (!ok) return;
+          closeModal();
+          resolve(scope);
+        });
+      }
+
       openModal(t("voxlink.modsync.title"),
         t("voxlink.modsync.subtitle", code),
-        '<div class="modsync-h">' + VL.esc(t("voxlink.modsync.scope_hint")) + "</div>",
+        instanceBlock() +
+        '<div class="modsync-h">' + VL.esc(t("voxlink.modsync.scope_hint")) + "</div>" +
+        '<div class="modsync-warn" id="ms-inst-err"></div>',
         '<button class="btn btn-primary" id="ms-required">' + VL.esc(t("voxlink.modsync.scope_required")) + "</button>" +
         '<button class="btn btn-ghost" id="ms-all">' + VL.esc(t("voxlink.modsync.scope_all")) + "</button>" +
         '<button class="btn btn-ghost" id="ms-skip">' + VL.esc(t("voxlink.modsync.skip_check")) + "</button>");
-      VL.$("#ms-required").addEventListener("click", function () { closeModal(); resolve("required"); });
-      VL.$("#ms-all").addEventListener("click", function () { closeModal(); resolve("all"); });
+
+      var sel = VL.$("#ms-inst");
+      if (sel) {
+        sel.addEventListener("change", function () { picked = sel.value; paintTarget(); });
+        paintTarget();
+      }
+      VL.$("#ms-required").addEventListener("click", function () { choose("required"); });
+      VL.$("#ms-all").addEventListener("click", function () { choose("all"); });
       VL.$("#ms-skip").addEventListener("click", function () {
         VL.api("ModSyncBypass", code).catch(function () { });
         closeModal();
@@ -428,6 +631,9 @@
   }
 
   function runGate(code) {
+    // askScope 里已经把「装到哪个实例」落成了 activeInstance：
+    // 随后的 ModSyncGate（比对）与 ModSyncDownload（写入）都走它解析出的那一套
+    // loader / gameVersion / modsDir，所以这里不需要再传任何参数。
     return askScope(code).then(function (scope) {
       if (!scope) return { action: "proceed" };
       return new Promise(function (resolve, reject) {
@@ -483,12 +689,18 @@
   var rawApi = VL.api;
   VL.api = async function (name) {
     var args = Array.prototype.slice.call(arguments, 1);
-    if (name === "JoinRoom" && settings.configured && settings.joinRequiredModsCheck) {
-      var code = "";
-      try { code = (JSON.parse(args[0] || "{}").code || "").toUpperCase(); } catch (e) { code = ""; }
-      if (code) {
-        VL.api("ModSyncClearGate", code).catch(function () { });
-        await runGate(code); // 玩家取消 → 仍继续原有 JoinRoom 流程由上层按钮状态决定
+    if (name === "JoinRoom") {
+      // 实例与两个开关是「创建房间 / 设置」页写的，本文件缓存的那份会过期
+      // （以前只在启动时读一次：刚配好实例就去加入的玩家照样被判成"没配置"，
+      //  于是门控整段被跳过）。加入前重新读一遍，顺带给 askScope 选实例备好数据。
+      await loadSettings();
+      if (settings.configured && settings.joinRequiredModsCheck) {
+        var code = "";
+        try { code = (JSON.parse(args[0] || "{}").code || "").toUpperCase(); } catch (e) { code = ""; }
+        if (code) {
+          VL.api("ModSyncClearGate", code).catch(function () { });
+          await runGate(code); // 玩家取消 → 仍继续原有 JoinRoom 流程由上层按钮状态决定
+        }
       }
     }
     return rawApi.apply(VL, [name].concat(args));
@@ -563,11 +775,9 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    rawApi("GetModSyncSettings").then(function (v) {
-      settings = v || settings;
-    }, function () { });
-    // MC 实例与两个必装开关都挪到了「创建房间」页（create.js 负责），
-    // 这里只缓存一份设置给加入侧的门控用。
+    loadSettings();
+    // MC 实例与两个必装开关都在「创建房间 / 设置」页配置（create.js / settings.js），
+    // 加入侧只在门控前读一份现状；从没建过房的玩家由 askScope 就地补一个实例。
   }
 
   if (document.readyState === "loading") {

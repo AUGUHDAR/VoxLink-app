@@ -61,6 +61,24 @@ window.VL = window.VL || {};
       .replace(/'/g, "&#39;");
   };
 
+  // 目录选择：任何带 data-browse-dir 的按钮，点击后把选中的路径写回它前面那个输入框，
+  // 并补发一次 change，让既有的联动（校验/回写）照常跑。后端没有对话框能力时返回空串，
+  // 此时什么都不改，玩家填的原值保持不动。
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest("[data-browse-dir]") : null;
+    if (!btn) return;
+    ev.preventDefault();
+    var input = btn.previousElementSibling;
+    if (!input || input.tagName !== "INPUT") return;
+    VL.api("SelectModsDir").then(function (res) {
+      var path = (res && res.path) || "";
+      if (!path) return;
+      input.value = path;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, function () { /* 无后端/无对话框能力：静默，别弹错误打扰玩家 */ });
+  });
+
   VL.fmtSize = function (bytes) {
     var n = Number(bytes);
     if (!isFinite(n) || n <= 0) return "-";

@@ -23,6 +23,12 @@ type filePicker interface {
 	PickFiles(title string, filters []pickFilter) ([]string, error)
 }
 
+// dirPicker 是 filePicker 的可选扩展：只有 UI 版实现了它，
+// CLI 版 picker 为 nil，调用处按"没有对话框"降级。
+type dirPicker interface {
+	PickDir(title string) (string, error)
+}
+
 // nullSink 丢弃全部事件：单元测试与不需要事件的调用方使用。
 type nullSink struct{}
 

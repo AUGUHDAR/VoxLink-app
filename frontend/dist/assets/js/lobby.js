@@ -1,6 +1,6 @@
 /* ============================================================
  * VoxLink Desktop — lobby.js
- * 大厅：搜索 / 分类 / 加载器筛选 / 房间卡片网格 / 分页 / 公网 IP
+ * 大厅：搜索 / 分类 / 加载器筛选 / 版本筛选 / 房间卡片网格 / 分页 / 公网 IP
  * ============================================================ */
 "use strict";
 
@@ -11,6 +11,7 @@
     category: "",
     loader: "",
     search: "",
+    version: "",      // 版本筛选："" = 全部版本；"__none__" = 未指定；其余为规范化后的版本键
     total: 0,
     categories: {},   // key -> 中文名
     loading: false,
@@ -132,10 +133,80 @@
   // 「排除 Happy Link」：纯前端过滤当前这一页，与网页端同名开关同一口径
   // （web/index.html 的 excludeHL 也不写 localStorage、不改服务端查询）。
   // 因此开着它时同一页可能少几张卡，分页总数仍按服务端返回算——网页端同样如此。
+  // 版本筛选走同一套路：只在前端过当前这一页，不碰 ListRooms 的参数。
   function visibleRooms() {
     var rooms = state.rooms || [];
-    if (!state.excludeHL) return rooms;
-    return rooms.filter(function (r) { return r.source !== "happylink"; });
+    if (state.excludeHL) {
+      rooms = rooms.filter(function (r) { return r.source !== "happylink"; });
+    }
+    if (state.version) {
+      rooms = rooms.filter(function (r) { return versionValueOf(r.gameVersion) === state.version; });
+    }
+    return rooms;
+  }
+
+  /* ---------------- 版本筛选 ---------------- */
+  // 口径对齐网页端（server-go/web/index.html 的 filterRooms / versionFilter）：
+  // 1) 候选不查服务端，全部从"当前已取到的那一页房间"的 gameVersion 里取，按语义
+  //    （忽略首尾空格与大小写）去重、保留首次出现的写法与顺序；
+  // 2) "全部"用空串表示，跟网页端 versionFilter 留空、分类下拉 value="" 同一套写法；
+  // 3) 与搜索 / 分类 / 加载器 / 排除 Happy Link 是"与"关系，全部条件同时成立才保留。
+  // 网页端的版本框是自由文本，判据是 rv===v || rv.startsWith(v+".")（小写比较）；
+  // 下拉里每个候选就是完整版本号，所以规范化后精确相等即可，是网页端口径的退化形式。
+  // gameVersion 为空或 "unknown" 归到单独一项「未指定」：这些房间照常出现在网格里，
+  // 不给候选项就永远筛不到它们；把它们混进真实版本又会破坏"某版本"筛选的准确性。
+  var VERSION_NONE = "__none__";
+
+  // 原始写法（已去首尾空格）；空或 unknown 返回 VERSION_NONE
+  function versionLabelOf(v) {
+    var s = String(v == null ? "" : v).trim();
+    if (!s || s.toLowerCase() === "unknown") return VERSION_NONE;
+    return s;
+  }
+
+  // option value：小写化的语义键，同一版本的不同大小写写法落到同一个值
+  function versionValueOf(v) {
+    var label = versionLabelOf(v);
+    return label === VERSION_NONE ? VERSION_NONE : label.toLowerCase();
+  }
+
+  // 动态创建下拉，插到分类下拉右侧（同一 toolbar 行内），省掉改 index.html
+  function ensureVersionFilter() {
+    els.version = VL.$("#lobby-version");
+    if (els.version) return;
+    if (!els.category || !els.category.parentNode) return;
+    var sel = document.createElement("select");
+    sel.className = "select";
+    sel.id = "lobby-version";
+    sel.title = "按 Minecraft 版本筛选（只影响当前这一页显示，不改服务端查询）";
+    sel.innerHTML = '<option value="">全部版本</option>';
+    els.category.parentNode.insertBefore(sel, els.category.nextSibling);
+    els.version = sel;
+  }
+
+  // 每次取回列表后重建候选；当前选中项在新候选里不存在时回落"全部版本"
+  function renderVersionOptions() {
+    if (!els.version) return;
+    var seen = {};
+    var opts = [];
+    var hasNone = false;
+    (state.rooms || []).forEach(function (r) {
+      var value = versionValueOf(r.gameVersion);
+      if (value === VERSION_NONE) { hasNone = true; return; }
+      if (seen[value]) return;
+      seen[value] = true;
+      opts.push({ value: value, label: versionLabelOf(r.gameVersion) });
+    });
+    var html = '<option value="">全部版本</option>';
+    opts.forEach(function (o) {
+      html += '<option value="' + VL.esc(o.value) + '">' + VL.esc(o.label) + "</option>";
+    });
+    if (hasNone) html += '<option value="' + VERSION_NONE + '">未指定</option>';
+    var exists = state.version === "" ||
+      (state.version === VERSION_NONE ? hasNone : !!seen[state.version]);
+    if (!exists) state.version = "";
+    els.version.innerHTML = html;
+    els.version.value = state.version;
   }
 
   function render() {
@@ -206,6 +277,7 @@
       VL.toast(VL.errText(e), "error");
     }
     state.loading = false;
+    renderVersionOptions();
     render();
   }
 
@@ -277,6 +349,7 @@
   /* ---------------- 初始化 ---------------- */
   VL.initLobby = function () {
     cacheEls();
+    ensureVersionFilter();
 
     els.refresh.addEventListener("click", function () {
       fetchRooms();
@@ -304,6 +377,14 @@
       state.page = 1;
       fetchRooms();
     });
+
+    if (els.version) {
+      els.version.addEventListener("change", function () {
+        state.version = els.version.value;
+        // 纯前端过滤当前这一页：不发请求、不重置页码（与排除 Happy Link 开关同一口径）
+        render();
+      });
+    }
 
     if (els.excludeHL) {
       els.excludeHL.addEventListener("click", function () {

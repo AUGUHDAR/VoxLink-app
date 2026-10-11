@@ -502,6 +502,62 @@
           <button class="btn btn-primary" id="set-save">保存设置</button>
         </div>
 
+        <!-- MC 实例管理：实例清单是全局的，创建房间页下拉里看到的就是它们 -->
+        <div class="card form-card" id="set-msi-card">
+          <div class="card-head">
+            <span class="ico ico-accent" data-ico="mods"></span>
+            <span class="card-title">MC 实例管理</span>
+            <span class="card-count" id="set-msi-count">正在读取…</span>
+          </div>
+          <p class="form-hint">这里集中管你建过的所有 MC 实例：名字、mods 目录、加载器、MC 版本都能改。
+            标了「正在使用」的那个就是创建房间时帮你同步必装 Mod 的实例。mods 目录要把完整路径贴进来（暂时没有选文件夹的按钮）。</p>
+
+          <div class="empty empty-sm hidden" id="set-msi-empty">还没有实例，点下面的「新建实例」加一个吧</div>
+          <div id="set-msi-list"></div>
+          <div class="form-error hidden" id="set-msi-error"></div>
+
+          <div class="field hidden" id="set-msi-form">
+            <div class="field-label">新实例</div>
+            <div class="field-row">
+              <div class="field">
+                <label class="field-label" for="set-msi-name">实例名</label>
+                <input type="text" class="input" id="set-msi-name" placeholder="例如 1.20.1 科技服" maxlength="24" autocomplete="off">
+              </div>
+              <div class="field">
+                <label class="field-label" for="set-msi-loader">加载器</label>
+                <select class="select" id="set-msi-loader">
+                  <option value="fabric">fabric</option>
+                  <option value="forge">forge</option>
+                  <option value="neoforge">neoforge</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="set-msi-dir">mods 目录</label>
+              <input type="text" class="input" id="set-msi-dir" placeholder="C:/Users/You/AppData/Roaming/.minecraft/mods" autocomplete="off">
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label class="field-label" for="set-msi-gv">MC 版本</label>
+                <input type="text" class="input" id="set-msi-gv" placeholder="1.20.1" maxlength="16" autocomplete="off">
+              </div>
+              <div class="field ms-actions">
+                <button type="button" class="btn btn-ghost" id="set-msi-save-new">保存实例</button>
+                <button type="button" class="btn btn-ghost" id="set-msi-cancel-new">取消</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="btn-row">
+              <button type="button" class="btn btn-primary" id="set-msi-save">保存修改</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="set-msi-new">新建实例</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="set-msi-refresh">重新读取</button>
+            </div>
+            <p class="form-hint">改完点「保存修改」；点某一行的「设为当前」或「删除」，也会把你在上面已经填好的一起存下来 qwq</p>
+          </div>
+        </div>
+
         <div class="card form-card">
           <div class="about-row">
             <div>
