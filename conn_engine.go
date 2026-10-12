@@ -1430,7 +1430,7 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 		}
 
 		// PunchTuner 自适应调参
-		params = tunerNextParams(profile, localNat, remoteNat, cycle, profile.maxCycles, lastFailure, lastResult)
+		params = tunerNextParams(profile, localNat, remoteNat, cycle, effectiveMaxCycles(profile, stunGetCachedResult()), lastFailure, lastResult)
 		strategy := selectStrategy(localNat, remoteNat, cycle, false)
 
 		p := newPuncher(sock, profile, params, authKey)
@@ -1524,7 +1524,7 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 
 		// 轮次推进：cycle 耗尽 → 持续重试轮 +1 + 档位升级 + cycle 归零
 		cycle++
-		if cycle >= profile.maxCycles {
+		if cycle >= effectiveMaxCycles(profile, stunGetCachedResult()) { // CM:6214-6228 getEffectiveMaxCycles()
 			e.mu.Lock()
 			e.retryRound++
 			rr := e.retryRound
@@ -2034,7 +2034,7 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 			return
 		}
 
-		params = tunerNextParams(profile, hostNat, joinerNat, cycle, profile.maxCycles, lastFailure, lastResult)
+		params = tunerNextParams(profile, hostNat, joinerNat, cycle, effectiveMaxCycles(profile, stunGetCachedResult()), lastFailure, lastResult)
 		strategy := selectStrategy(hostNat, joinerNat, cycle, false)
 
 		p := newPuncher(sock, profile, params, authKey)
@@ -2112,7 +2112,7 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 		p.cancel()
 
 		cycle++
-		if cycle >= profile.maxCycles {
+		if cycle >= effectiveMaxCycles(profile, stunGetCachedResult()) { // CM:6214-6228 getEffectiveMaxCycles()
 			profile = escalateProfileForRound(profile, 0)
 			punchProfileSwitch(profile, "host_continuous_retry")
 			cycle = 0

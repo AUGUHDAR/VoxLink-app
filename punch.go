@@ -537,11 +537,10 @@ func (p *puncher) sendLoopPrediction(portRange int, fixedRange bool) {
 			if fixedRange {
 				currentRange = portRange
 			} else {
-				idx := cycles / maxInt(1, p.profile.cyclesPerRange)
-				if idx >= len(p.profile.progressiveRanges) {
-					idx = len(p.profile.progressiveRanges) - 1
-				}
-				currentRange = minInt(p.profile.progressiveRanges[idx], p.effectivePortRange())
+				// UHP:1253-1258：渐进窗要受**信令里对端上报的窗口**封顶，
+				// 本端档位窗只作兜底。旧写法只用本端 effectivePortRange()，
+				// 对端报了更窄的窗口时本端会过扫（多打无用包，还可能触发限速）。
+				currentRange = progressiveSweepRange(p.profile, p.params, cycles, portRange)
 			}
 			p.sendControlMultiPort(currentRange, cycles)
 		} else {
