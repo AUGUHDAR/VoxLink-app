@@ -191,14 +191,7 @@ func (s *session) heartbeatLoop() {
 		}
 
 		seq++
-		body := map[string]any{
-			"code":            s.code,
-			"token":           s.token,
-			"isHost":          s.isHost,
-			"seq":             seq,
-			"currentInterval": 5,
-			"mcPlayerCount":   0,
-		}
+		body := s.heartbeatBody(seq)
 		var hb struct {
 			HeartbeatInterval int    `json:"heartbeatInterval"`
 			CurrentPlayers    int    `json:"currentPlayers"`
@@ -437,6 +430,27 @@ func (s *session) httpPollOnce() (done bool, failed bool) {
 	return false, false
 }
 
+// heartbeatBody 与模组 heartbeatTask 同一组字段（RoomManager.java:1480-1497 发
+// natType / load / peerLatency / overlayPort / mcPlayerCount）；服务端按这四个键写拓扑节点
+// （server-go/roommanager.go:1181-1186：nat_type/load/overlay_port/peers）。
+// 本端此前只发 code/token/isHost/seq/currentInterval/mcPlayerCount —— 少这四个键，
+// 应用端房间在服务端拓扑视图里永远是不可用节点（nat_type 空、overlay_port 0）。
+func (s *session) heartbeatBody(seq int64) map[string]any {
+	room := s.app.snapshotRoom()
+	return map[string]any{
+		"code":            s.code,
+		"token":           s.token,
+		"isHost":          s.isHost,
+		"seq":             seq,
+		"currentInterval": 5,
+		"mcPlayerCount":   0,
+		"natType":         roomStr(room, "natType"),
+		"load":            0.1,
+		"peerLatency":     topologyPeerLatency(),
+		"overlayPort":     topologyOverlayPort(),
+	}
+}
+
 // handleSignals 分发信令并推进 since 游标（同时交给连接引擎处理）。
 func (s *session) handleSignals(sd signalsData) {
 	maxTs := s.since.Load()
@@ -456,6 +470,8 @@ func (s *session) handleSignals(sd signalsData) {
 		})
 		// 连接引擎按 type 分发（只处理引擎关心的类型）
 		s.app.engine.onSignal(sig.Type, sig.From, data)
+		// 拓扑信令：模组 RoomManager 在同一个分发点把 topology_* 两型交给 TopologyClient
+		topologyHandleSignal(sig.Type, data)
 		// 模组同步：mods_request 要现算/回传清单（可能几十秒），必须离开信令分发线程
 		// ——与模组把 bind/allocate 丢给 TURN_BG_EXECUTOR 是同一条教训（审计 P1-2）。
 		s.app.modSyncHandleSignalAsync(sig.Type, sig.From, data)

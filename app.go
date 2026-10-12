@@ -149,6 +149,10 @@ func NewApp() *App {
 	}
 	a.settingsPath = defaultSettingsPath()
 	a.engine = newConnEngine(a)
+	// 模组在 VoxLinkMod.java:141（SignalingClient 建好之后、RoomManager 之前）装拓扑客户端；
+	// 本端此前只有测试在装，导致 getTopologyClient() 恒 nil —— 预热/轮询/overlay/心跳两字段
+	// 全部走 nil-safe 早退，功能整块不生效。这里补上唯一的安装点。
+	installTopologyClient(a)
 	return a
 }
 
@@ -319,6 +323,9 @@ func (a *App) startSession(code, token string, isHost bool, room map[string]any,
 	s := newSession(a, code, token, isHost)
 	a.setState(state, code, token, isHost, room, s)
 	a.engine.bindSession(s, clientID)
+	// 模组在房间确立时把 (code, token, isHost, clientId) 交给 TopologyClient，并按 nodeID
+	// 规则区分 host_/client_（topology.go:245-266 照抄该规则），同时起 overlay 与轮询。
+	topologyOnRoomJoined(code, token, isHost, clientID, 0)
 	a.emit("session:state", map[string]any{
 		"state": state,
 		"room":  copyMap(room),
@@ -341,8 +348,12 @@ func (a *App) leaveInternal() {
 	}
 	a.mu.Unlock()
 
+	// 模组在房间离开回调里做同样的事（RoomManager.java:170-180 → topologyClient.onRoomLeft）：
+	// 停 overlay、清 code/token/nodeID、把 generation 归零。放在会话判空之前，
+	// 保证"没起过会话也调了一次离开"也把状态清干净（幂等）。
+	topologyOnRoomLeft()
+
 	if s != nil {
-		a.engine.relayRelease()
 		a.engine.unbindSession(s)
 		s.stop()
 		select {

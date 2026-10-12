@@ -1,6 +1,13 @@
 # VoxLink CLI 调用说明
 
-> 面向启动器与脚本作者。CLI 版与 UI 版是同一套联机引擎，功能一致，只是没有窗口。
+> 面向启动器与脚本作者。CLI 版与 UI 版**编译同一份联机引擎**（`conn_engine.go`、`punch*.go`、
+> `stun*.go`、`rudp*.go`、`relay.go`、`bridge.go`、`std_turn.go`、`auto_relay.go`、`session.go`
+> 全部无构建标签，两个产物都编进去），打洞、TURN、中继、互通的行为逐语句一致。
+> **功能面不是完全一致**：按 2026-10-12 逐方法核对，UI 侧被前端调用的方法 34 个、CLI 命令 25 条，
+> UI 有而 CLI 没有 14 项（原生目录选择、工单附件选择框、逐屏语言切换、开浏览器，
+> 以及**模组同步全套 10 个方法**），CLI 有而 UI 没有 3 项（`relay status` / `relay list` / `ticket viewed`）。
+> 特别注意：**`room join` 在 CLI 下不会走"必装模组差异门控"**（UI 是前端在 JoinRoom 之前调
+> `ModSyncGate`，JoinRoom 自身不含这道门）。启动器若要这条检查，目前只能自己比对房主清单。
 > 目标是**尽量向后兼容**：命令与字段以本文与 `describe --json` 为准，我们会避免破坏性改动；
 > 若确有需要调整，会在同一版本线上保留兼容路径，并在发版说明里标注。
 
