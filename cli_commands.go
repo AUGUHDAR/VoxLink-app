@@ -97,6 +97,10 @@ var roomCreateParams = []cliParam{
 var roomJoinParams = []cliParam{
 	{Name: "code", Field: "code", Kind: "string", Help: "6 位房号"},
 	{Name: "password", Field: "password", Kind: "string", Help: "房间密码"},
+	{Name: "modsync", Field: "modsync", Kind: "string", Default: "gate",
+		Help: "必装模组门控：gate|apply|skip|off（默认 gate：需要装东西就返回差异分区、不加入）"},
+	{Name: "downloadTimeoutSec", Field: "downloadTimeoutSec", Kind: "int", Default: 900,
+		Help: "modsync=apply 时等下载终局的秒数"},
 }
 
 var lobbyListParams = []cliParam{
@@ -134,8 +138,8 @@ var ticketRetractParams = []cliParam{
 var cliCommands = []cliCommand{
 	{Path: "room create", Summary: "创建房间并开启会话", Params: roomCreateParams,
 		Run: func(a *App, _ context.Context, p string) (string, error) { return a.CreateRoom(p), nil }},
-	{Path: "room join", Summary: "加入房间并开启会话", Params: roomJoinParams,
-		Run: func(a *App, _ context.Context, p string) (string, error) { return a.JoinRoom(p), nil }},
+	{Path: "room join", Summary: "加入房间并开启会话（默认先过必装模组门控）", Params: roomJoinParams,
+		Run: func(a *App, _ context.Context, p string) (string, error) { return a.cliJoin(p), nil }},
 	{Path: "room leave", Summary: "离开当前房间",
 		Run: func(a *App, _ context.Context, _ string) (string, error) { return a.LeaveRoom(), nil }},
 	{Path: "room status", Summary: "当前会话状态",

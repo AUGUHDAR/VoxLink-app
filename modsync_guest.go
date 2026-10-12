@@ -157,6 +157,18 @@ type modSyncDownloadState struct {
 	abort    atomic.Bool
 	startMs  int64
 	cancelWG sync.WaitGroup
+	// last 下载终局快照（与 "modsync:download" 事件同载荷）。
+	// 存在理由：CLI/启动器是一次性进程，未必挂着事件流，必须还能事后问出结果。
+	last map[string]any
+}
+
+// modSyncEmitDownloadFinal 下载终局：发给界面（模组 SelectScreen 回调的等价物），
+// 同时留快照。载荷字段一律可选，调用方按自己关心的读。
+func (a *App) modSyncEmitDownloadFinal(payload map[string]any) {
+	a.emit("modsync:download", payload)
+	modSyncDL.mu.Lock()
+	modSyncDL.last = payload
+	modSyncDL.mu.Unlock()
 }
 
 var modSyncDL = &modSyncDownloadState{}
@@ -906,6 +918,7 @@ func (a *App) ModSyncDownload(reqJSON string) string {
 		return wrapErr("BUSY", "下载正在进行中")
 	}
 	modSyncDL.running = true
+	modSyncDL.last = nil // 新一轮开始，旧终局不得被事后读到（CLI 轮询靠这个判终局）
 	modSyncDL.abort.Store(false)
 	modSyncDL.startMs = time.Now().UnixMilli()
 	modSyncDL.mu.Unlock()
@@ -921,12 +934,22 @@ func (a *App) ModSyncCancelDownload() string {
 	return wrapOK(map[string]any{"cancelling": true})
 }
 
-// ModSyncDownloadState：前端重连/切页后取回当前进度。
+// ModSyncDownloadState：前端重连/切页后取回当前进度；CLI/启动器轮询同一个口拿终局快照。
 func (a *App) ModSyncDownloadState() string {
 	modSyncDL.mu.Lock()
 	running := modSyncDL.running
+	abort := modSyncDL.abort.Load()
+	last := modSyncDL.last
+	elapsed := modSyncDL.startMs
 	modSyncDL.mu.Unlock()
-	return wrapOK(map[string]any{"running": running, "abort": modSyncDL.abort.Load()})
+	out := map[string]any{"running": running, "abort": abort}
+	if elapsed > 0 {
+		out["elapsedMs"] = time.Now().UnixMilli() - elapsed
+	}
+	if last != nil {
+		out["last"] = last
+	}
+	return wrapOK(out)
 }
 
 func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
@@ -938,7 +961,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 
 	modsDir := env.ModsDir
 	if err := modSyncMkdirAll(modsDir); err != nil {
-		a.emit("modsync:download", map[string]any{
+		a.modSyncEmitDownloadFinal(map[string]any{
 			"outcome": "failed",
 			"note":    newModSyncLangLine(langModSyncDownloadFailed, "mods dir"),
 		})
@@ -959,7 +982,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 	for i, e := range entries {
 		if shouldAbort() {
 			a.modSyncEmitProgress(entries, i, doneFiles, bytesDone, totalBytes, "", 0)
-			a.emit("modsync:download", map[string]any{
+			a.modSyncEmitDownloadFinal(map[string]any{
 				"outcome":    "cancelled",
 				"note":       newModSyncLangLine(langModSyncDownloadCancelled),
 				"downloaded": succeeded,
@@ -986,7 +1009,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 				// 玩家取消：静默收场，不算失败（:364-368）
 				modSyncLogInfo("download {} cancelled by user", e.FileName) // ModSyncSelectScreen.java:366
 				a.modSyncEmitProgress(entries, i, doneFiles, bytesDone, totalBytes, current, 0)
-				a.emit("modsync:download", map[string]any{
+				a.modSyncEmitDownloadFinal(map[string]any{
 					"outcome":    "cancelled",
 					"note":       newModSyncLangLine(langModSyncDownloadCancelled),
 					"downloaded": succeeded,
@@ -1018,7 +1041,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 	}
 
 	if shouldAbort() {
-		a.emit("modsync:download", map[string]any{
+		a.modSyncEmitDownloadFinal(map[string]any{
 			"outcome":    "cancelled",
 			"note":       newModSyncLangLine(langModSyncDownloadCancelled),
 			"downloaded": succeeded,
@@ -1030,7 +1053,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 	if succeeded > 0 && lastError == "" {
 		// RestartScreen（:27-38）：restart_title / restart_line1(数量) / restart_line2，
 		// 唯一出口按钮 = 退出游戏。本端等价：提示"重启 MC 实例后生效"。
-		a.emit("modsync:download", map[string]any{
+		a.modSyncEmitDownloadFinal(map[string]any{
 			"outcome":    "done",
 			"downloaded": succeeded,
 			"restart":    true,
@@ -1045,7 +1068,7 @@ func (a *App) modSyncDownloadLoop(env modSyncEnv, entries []*modSyncEntry) {
 	if lastError != "" {
 		errName = modSyncClipRune(lastError, 40)
 	}
-	a.emit("modsync:download", map[string]any{
+	a.modSyncEmitDownloadFinal(map[string]any{
 		"outcome":    "failed",
 		"downloaded": succeeded,
 		"note":       newModSyncLangLine(langModSyncDownloadFailed, errName),
