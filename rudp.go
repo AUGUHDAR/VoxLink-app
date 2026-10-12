@@ -852,7 +852,8 @@ func (c *rudpConn) processFrame(f rudpFrame) {
 		c.rlog("info", "Received peer RESTART signal, trigger ICE Restart")
 		c.triggerIceRestart()
 	case rudpTypeVoice:
-		c.markRecv() // 忽略
+		c.markRecv()
+		c.handleVoice(f)
 	}
 }
 

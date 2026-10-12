@@ -199,6 +199,30 @@ func (b *udpForwardBridge) isActive() bool {
 	return len(b.bridges) > 0
 }
 
+// 模组写死的两个语音端口（CM:15767：24454 与 25565）。
+var udpForwardVoicePorts = []int{24454, 25565}
+
+// startVoiceForwardBridge = CM:15761-15785：给一条刚建立的传输挂语音转发桥。
+// 只挂在打洞出来的直连传输上——模组唯一的调用点在 establishUdpTransport 末尾（CM:15755），
+// TURN 传输（CM:11678/11864/12001/12143）与玩家中继传输（CM:11273/13345）都不挂。
+// 一个端口都没绑上就立刻关掉（CM:15769-15777）；起桥异常按 CM:15779-15783 只留一行 warn。
+func startVoiceForwardBridge(transport *rudpConn, isHost bool, logf func(level, msg string)) *udpForwardBridge {
+	if transport == nil {
+		return nil
+	}
+	defer func() {
+		if r := recover(); r != nil && logf != nil {
+			logf("warn", fmt.Sprintf("[UdpForward] voice relay failed to start: %v", r))
+		}
+	}()
+	b := newUdpForwardBridge(transport, isHost, udpForwardVoicePorts, logf)
+	if !b.isActive() {
+		b.close()
+		return nil
+	}
+	return b
+}
+
 // close 对应 :70-79（幂等）。
 func (b *udpForwardBridge) close() {
 	if !b.closed.CompareAndSwap(false, true) {

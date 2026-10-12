@@ -413,6 +413,9 @@ func (a *App) clearSession(s *session) {
 	// 必须放在锁外：stopFedTunnel / sessionStopped 都会经 netLog→emit 回来抢同一把 a.mu。
 	if had {
 		a.stopFedTunnel()
+		// 本机 /info 服务随会话收尾（模组在游戏退出时停，PeerServer.java:109-121；
+		// 本端进程模型是会话制，不收就会在 CLI 单次命令结束后留一个回环监听口）。
+		stopPeerServer()
 		// 房被回收/被踢/令牌失效这类"会话自己死了"的路径同样要收尾：
 		// 模组在 handleRoomLost 里就明确 closePort(hostPort)（RoomManager.java:1289-1298），
 		// 否则房主的 UPnP 映射会一直挂在路由器上、续租任务每 50 分钟续一次直到进程退出。
@@ -747,6 +750,12 @@ func (a *App) CreateRoom(reqJSON string) string {
 	// hostSessionStarted 的后台探测（session_wiring.go），与模组同一时序。
 	natType := "unknown"
 
+	// 本机 /info 服务（PeerServer.java:54-107）：模组在游戏启动时就拉起，建房时把端口随
+	// create_room 上报（RoomManager.java:162 取端口 → SignalingClient.java:185-186）。
+	// 本端的进程模型是"建房/加入才起"，同样只绑回环、同样随机端口。
+	setPeerCacheProvider(a.peerCacheFromApp)
+	peerPort := startPeerServer(a)
+
 	body := map[string]any{
 		"name":                  req.Name,
 		"maxPlayers":            20,
@@ -758,8 +767,7 @@ func (a *App) CreateRoom(reqJSON string) string {
 		"loader":                loader,
 		"clientType":            "app",
 		"clientProtocolVersion": clientProtocolVersion,
-		"clientCapabilities":    a.modSyncCapabilities(),
-		// modVersion：本端版本号，服务端存进房间（server-go/roommanager.go:386-390）
+		"clientCapabilities":    a.modSyncCapabilities(), // modVersion：本端版本号，服务端存进房间（server-go/roommanager.go:386-390）
 		// 并渲染到大厅/后台版本列。模组在 create 即无条件上报
 		// （SignalingClient.java:192），本端对齐携带 appVersion。
 		"modVersion": appVersion,
@@ -767,6 +775,9 @@ func (a *App) CreateRoom(reqJSON string) string {
 	// clientTag：来源标记，为空则整个字段不发（服务端 create 侧再校验一次）。
 	if clientTag != "" {
 		body["clientTag"] = clientTag
+	}
+	if peerPort > 0 {
+		body["peerPort"] = peerPort // SignalingClient.java:185-186：未起服务时不发这个键
 	}
 	if req.Password != "" {
 		body["password"] = req.Password

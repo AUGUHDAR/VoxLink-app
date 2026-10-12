@@ -39,6 +39,50 @@ func (a *App) hostSessionStarted(code, name string, hostPort int, hostIp, hostIp
 func (a *App) guestSessionStarted(code string) {
 	setActiveAppForTransport(a)
 	a.logUploadArm(code, false) // AttemptingJoinScreen.java:258
+	// 本机 /info 服务与房主同形态常驻（PeerServer.java:54-107 在游戏启动时起，不分角色）
+	setPeerCacheProvider(a.peerCacheFromApp)
+	startPeerServer(a)
+}
+
+// peerCacheFromApp 把模组的三个进程内取值换成本端等价来源（裁定的"允许等价替换"）：
+//
+//	mc.getLaunchedVersion() → 本端房间记录里的 gameVersion
+//	FabricLoader.getMods() → modsync 已建好的本地清单（同一批 jar 的 id/version），
+//	  只读内存里现成的缓存，绝不在 /info 的请求路径上触发重建
+//	ViaCompat.getServerProtocolVersion() → 本端没有对应物（应用端不承载 MC 进程，
+//	  也没有 Via 转换层），按模组"取不到"的初值给 0，而不是猜一个协议号
+//	Geyser → 本端不承载 Geyser，恒 false（模组 :158-160 也是"没加载就 false"）
+func (a *App) peerCacheFromApp() peerCacheValues {
+	v := peerCacheValues{VoxLinkVersion: appVersion}
+	a.mu.Lock()
+	if a.room != nil {
+		v.GameVersion = roomStr(a.room, "gameVersion")
+	}
+	a.mu.Unlock()
+	if s := a.modSync(); s != nil {
+		s.mu.Lock()
+		cache := s.cachedRoot
+		s.mu.Unlock()
+		if cache == nil {
+			return v
+		}
+		if m := cache.scopeManifest(modSyncScopeAll); m != nil {
+			for _, e := range m.Mods {
+				if e == nil {
+					continue
+				}
+				id := e.Slug
+				if id == "" {
+					id = e.ProjectID
+				}
+				if id == "" {
+					id = e.FileName
+				}
+				v.Mods = append(v.Mods, peerModEntry{id: id, version: e.VersionNumber})
+			}
+		}
+	}
+	return v
 }
 
 // hostNatMapAndProbe 后台那一整段（RoomManager.java:164-256 + :467-524）。

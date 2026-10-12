@@ -75,11 +75,24 @@ func setPeerCacheProvider(fn func() peerCacheValues) {
 }
 
 // startPeerServer 对应 :54-107：已启动则直接返回既有端口（幂等、同步）。
+// 取缓存与打日志都排在锁外做：provider 会回头拿 a.mu，而 /info 那条路是
+// 先 a.mu 再 peerSrv.mu（peerHandleInfo→peerBuildInfo），锁序反了会成环。
 func startPeerServer(app *App) int {
+	port, fresh := startPeerServerLocked(app)
+	if fresh {
+		refreshPeerCache()
+		if app != nil {
+			app.netLog("info", "Peer server started, port "+strconv.Itoa(port))
+		}
+	}
+	return port
+}
+
+func startPeerServerLocked(app *App) (int, bool) {
 	peerSrv.mu.Lock()
 	defer peerSrv.mu.Unlock()
 	if peerSrv.srv != nil {
-		return peerSrv.port
+		return peerSrv.port, false
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -89,7 +102,7 @@ func startPeerServer(app *App) int {
 		if app != nil {
 			app.netLog("error", "Peer server start failed: "+err.Error())
 		}
-		return -1
+		return -1, false
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(peerInfoPath, peerHandleInfo)
@@ -108,11 +121,7 @@ func startPeerServer(app *App) int {
 			}
 		}
 	}()
-	refreshPeerCache()
-	if app != nil {
-		app.netLog("info", "Peer server started, port "+strconv.Itoa(peerSrv.port))
-	}
-	return peerSrv.port
+	return peerSrv.port, true
 }
 
 // stopPeerServer 对应 :109-121：stop(1) 给在途请求 1s 收尾，然后端口复位 -1。

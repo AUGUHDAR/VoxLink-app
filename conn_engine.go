@@ -470,6 +470,9 @@ func (e *connEngine) teardown() {
 	}
 
 	// 关闭资源（rudp Close 会连带停桥的接收侧；bridge.stop 关 TCP 侧）
+	// 语音转发桥先收：模组的挂点在 killAllConnectionAttempts 里（CM:13803→15789-15805），
+	// 本端的同位落点就是这个"所有连接工作停下"的收口。
+	closeAllUdpForwardBridges()
 	if gPuncher != nil {
 		gPuncher.stop()
 	}
@@ -1245,6 +1248,9 @@ func (e *connEngine) guestWinP2P(gen int, p *puncher, sock *net.UDPConn, authKey
 		_ = sock.Close()
 	}
 	e.app.netLog("info", "P2P 打洞成功，rudp 隧道已建立")
+	// 语音转发桥：模组的挂点在 establishUdpTransport 末尾（CM:15755→15761-15785），
+	// 只有打洞出来的直连传输挂，TURN 与玩家中继的传输不挂。
+	startVoiceForwardBridge(rc, false, e.app.netLog) // CM:15767 joiner 侧：绑 loopback:24454/25565
 	// 成功卡上的地址必须是**本机桥接口**，不能是房主的 hostIp:hostPort：
 	// 模组里 MC 在进程内，它的连接会被模组钩住再转隧道，所以能给房主地址；
 	// 应用端 MC 是独立进程，它只会照着地址真连公网 —— 打不通，表现就是
@@ -2282,6 +2288,8 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 			p.cancel()          // 收掉本 puncher 的接收协程（组内 socket 由下一行统一处置）
 			closeGroup(winConn) // CM:4274-4284：赢家留着，其余源端口全部关掉
 			e.app.netLog("info", "host 端 rudp 隧道已建立，等待 MC 握手")
+			// 语音转发桥（CM:15755→15761-15785）：房主侧不绑端口，走出站中继（CM:15765 注释）
+			startVoiceForwardBridge(rc, true, e.app.netLog)
 			startHostLazyBridge(rc, mcPort, e.app.netLog)
 			return
 		}
