@@ -140,6 +140,7 @@ type connEngine struct {
 	connTimeoutSec     int           // CM:6625 connectionTimeoutSec
 	connTimeoutTimer   *sessionTimer // CM:6701 connectionTimeoutFuture
 	retryRound         int           // 持续重试轮次（零收包终局判定）
+	retryCancelled     bool          // CM:285 continuousRetryCancelled：对方取消后不再进持续重试轮
 	gLocalNat          natClass
 
 	// 智能自动中继编排器（模组 CM:12733-12747，字段含义逐项对应）
@@ -374,6 +375,7 @@ func (e *connEngine) teardown() {
 	e.punchRecvEver = false
 	e.predictionOffCount = 0
 	e.retryRound = 0
+	e.retryCancelled = false // CM:13921-13927 resetContinuousRetryState：下一间房从零开始
 	e.tcpPunchInFlight = false
 	e.gMyMappedIP = ""
 	e.gMyMappedPort = 0
@@ -560,6 +562,7 @@ var engineSignals = map[string]bool{
 	"tcp_punch_info":      true,
 	"tcp_punch_go":        true,
 	"tcp_simopen_request": true, // Wave2 房客请房主也发起 SimOpen（CM:7142）
+	"cancel_connection":   true, // RM:1956 → CM:14026 对端要求停止持续重试
 	"turn_bg_punch":       true, // RM:1950 → CM:12371 后台升直连
 	"turn_stby":           true, // RM:1953 → CM:12497 热备建立提示
 }
@@ -658,6 +661,10 @@ func (e *connEngine) onSignal(typ, from string, data map[string]any) {
 		if e.roleIsHost() {
 			e.hostOnTcpSimopenRequest(from, data)
 		}
+	case "cancel_connection":
+		// CM:14026-14070：对端按了"取消"。本端只停持续重试并清这一条对端状态，
+		// 绝不走终态关房（房主收到房客取消必须回等待态，见 2026-10-05 越权关房修复）。
+		e.handleCancelConnection(from)
 	case "turn_bg_punch":
 		// CM:12371：房主侧纯信号驱动（from 不参与判定，打的就是信令里带来的地址）
 		if e.roleIsHost() {
@@ -830,6 +837,12 @@ func (e *connEngine) beginGuestCycle() (int, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.gActive || e.gP2PDone {
+		return e.gCycle, false
+	}
+	// CM:13986-13990 shouldContinuousRetry：对方已取消持久重试 → 不再开新一轮。
+	// 首轮不受此门约束；中继两条道耗尽后的"复活打洞"会先清位再重驱（见 auto_relay F2）。
+	if e.retryCancelled && e.retryRound > 0 {
+		e.app.netLog("info", "voxlink.connection.persistent_retry_cancelled_skip_round")
 		return e.gCycle, false
 	}
 	e.gActive = true
@@ -1119,6 +1132,20 @@ func (e *connEngine) cancelConnectionTimeout() {
 	if t != nil {
 		t.cancel()
 	}
+}
+
+// handleCancelConnection 对位 CM:14026-14070：置"取消持久重试"位 → 留痕 →
+// 取消方正是 TURN 对端时静默拆 TURN → 按对端断开那套清场（removePeer + abortPunch + 关传输）。
+func (e *connEngine) handleCancelConnection(from string) {
+	e.mu.Lock()
+	e.retryCancelled = true // CM:14028
+	isTurnPeer := e.turnPeerID != "" && e.turnPeerID == from
+	e.mu.Unlock()
+	e.app.netLog("info", "voxlink.connection.persistent_retry_cancelled")
+	if isTurnPeer {
+		e.teardownTurnQuietly() // CM:14050-14053
+	}
+	e.onPeerDisconnect(from) // CM:14054-14068
 }
 
 // guestWinP2P 打洞成功后的收尾：CAS 占位 → rudp 承载 → 本地桥 → 成功事件。

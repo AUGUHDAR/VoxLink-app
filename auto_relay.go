@@ -336,6 +336,9 @@ func (e *connEngine) autoRelayFailoverOrEnd(reasonKey, reasonText string) {
 	if (e.gP2PDone || e.rDone) && !e.turnActiveLocked() && !e.rInFlight && carrierDead {
 		e.gP2PDone = false
 		e.rDone = false
+		// CM:12894：复活打洞前先清"对方已取消持久重试"位，
+		// 否则两条中继道耗尽后永远复活不了（取消只针对那一次持续重试，不等于整场放弃）。
+		e.retryCancelled = false
 	}
 	canRevive := !e.gP2PDone && !e.rDone && !e.turnActiveLocked() && !e.turnInFlight &&
 		!e.rInFlight && e.gPuncher == nil && !e.gActive
