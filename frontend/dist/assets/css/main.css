@@ -955,6 +955,14 @@ html[data-theme="dark"] .brand-logo {
   color: var(--text-faint);
   word-break: break-all;
 }
+.conn-nat {
+  margin-top: var(--sp-1);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.conn-nat-line {
+  display: block;
+}
 .conn-actions {
   display: flex;
   align-items: center;

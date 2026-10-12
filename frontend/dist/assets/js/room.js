@@ -396,6 +396,28 @@
     var hint = VL.$("#conn-hint");
     var success = VL.$("#conn-success");
     var appNote = VL.$("#conn-app-note");
+    var natBox = VL.$("#conn-nat");
+    if (natBox) {
+      var lines = [];
+      var n = conn.nat;
+      if (n && conn.status !== "success") {
+        lines.push(VL.t(n.labelOpponentKey, "对方") + ": " + VL.t(n.opponentKey, "未知"));
+        lines.push(VL.t(n.labelMineKey, "我方") + ": " + VL.t(n.mineKey, "未知"));
+        var diff = VL.t(n.difficultyKey, "中等");
+        if (n.doubt) diff += VL.t("voxlink.nat.doubt", "（存疑）");
+        lines.push(VL.t(n.labelDifficultyKey, "难度") + ": " + diff);
+        var hv = n.hostModVersion || VL.t(n.hostModVersionKey || "voxlink.host_version_unknown", "未知");
+        lines.push(VL.t(n.labelHostVersionKey, "对方版本") + ": " + hv);
+      }
+      natBox.textContent = "";
+      natBox.classList.toggle("hidden", lines.length === 0);
+      for (var li = 0; li < lines.length; li++) {
+        var row = document.createElement("span");
+        row.className = "conn-nat-line";
+        row.textContent = lines[li];
+        natBox.appendChild(row);
+      }
+    }
 
     // 连接卡顶部小字：对方为应用端房间
     if (appNote) appNote.classList.toggle("hidden", !(session.clientType === "app"));
@@ -493,6 +515,7 @@
   VL.onConnStateEvent = function (payload) {
     payload = payload || {};
     if (!conn) return;
+    conn.nat = payload.nat || conn.nat || null;
     var status = payload.status;
     var phase = CONN_TEXT[payload.phase] ? payload.phase : null;
 

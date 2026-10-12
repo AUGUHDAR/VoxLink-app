@@ -54,13 +54,18 @@ const (
 )
 
 // emitConnState 推送 conn:state 事件（host 端不调用）。
-func (a *App) emitConnState(phase, status, address, detail string) {
-	a.emit("conn:state", map[string]any{
+func (a *App) emitConnState(phase, status, address, detail string, nat map[string]any) {
+	payload := map[string]any{
 		"phase":   phase,
 		"status":  status,
 		"address": address,
 		"detail":  detail,
-	})
+	}
+	if nat != nil {
+		// 加入过程中的三行 NAT 文案（AttemptingJoinScreen.java:900-933 的等价出口）
+		payload["nat"] = nat
+	}
+	a.emit("conn:state", payload)
 }
 
 // notifyState 引擎侧状态推送：会话已解绑时静默（避免离开房间后还推失败态给前端）。
@@ -80,7 +85,10 @@ func (e *connEngine) notifyState(phase, status, address, detail string) {
 	case statusFailed:
 		e.app.logUploadOnDisconnected()
 	}
-	e.app.emitConnState(phase, status, address, detail)
+	e.mu.Lock()
+	localNat, remoteNat := e.gLocalNat, e.gRemoteNat
+	e.mu.Unlock()
+	e.app.emitConnState(phase, status, address, detail, e.natDisplaySnapshot(localNat, remoteNat))
 }
 
 // ---- 引擎 ----
