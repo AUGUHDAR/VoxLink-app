@@ -113,6 +113,10 @@ type App struct {
 	// 未打开时为 nil，netLog 只走 stderr + UI 事件（测试进程即如此）。
 	logFiles *logFiles
 
+	// 房主名审核结果的播报去重（RoomManager.java:1144-1150 的 lastModerationStatus/lastModeratedName）
+	lastModerationStatus string
+	lastModeratedName    string
+
 	mu      sync.Mutex
 	state   string // "idle" | "hosting" | "in_room"
 	code    string

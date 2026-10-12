@@ -196,6 +196,10 @@ func (s *session) heartbeatLoop() {
 			HeartbeatInterval int    `json:"heartbeatInterval"`
 			CurrentPlayers    int    `json:"currentPlayers"`
 			Name              string `json:"name"`
+			// 心跳响应也会携带审核结果（RoomManager.java:1594-1607）：信令丢包时这是唯一兜底。
+			NameModerationStatus *string `json:"nameModerationStatus"`
+			NameModerationReason string  `json:"nameModerationReason"`
+			NameApproved         *bool   `json:"nameApproved"`
 		}
 		// 心跳优先走 WS 帧（省去每 5s 一次的 HTTP 请求）；WS 未连接/失败回退 HTTP
 		var err error
@@ -231,7 +235,13 @@ func (s *session) heartbeatLoop() {
 				s.app.netLog("info", fmt.Sprintf("心跳已恢复（中断 %d 次）", fails))
 			}
 			fails = 0
-			s.app.updateRoomInfo(s, hb.CurrentPlayers, hb.Name)
+			s.app.updateRoomInfo(s, hb.CurrentPlayers, heartbeatDisplayName(hb.Name))
+			if hb.NameModerationStatus != nil {
+				// :1603 approved 直接取心跳里的 nameApproved，不靠状态字符串推断；
+				// :1597 服务端恒带 name，所以这里传指针而不是 nil。
+				approved := hb.NameApproved != nil && *hb.NameApproved
+				s.app.handleNameModerationUpdate(*hb.NameModerationStatus, hb.NameModerationReason, &hb.Name, approved)
+			}
 			if hb.HeartbeatInterval > 0 {
 				interval = time.Duration(hb.HeartbeatInterval) * time.Second
 			}
@@ -472,6 +482,8 @@ func (s *session) handleSignals(sd signalsData) {
 		s.app.engine.onSignal(sig.Type, sig.From, data)
 		// 拓扑信令：模组 RoomManager 在同一个分发点把 topology_* 两型交给 TopologyClient
 		topologyHandleSignal(sig.Type, data)
+		// 房主名审核三型（RoomManager.java:1967-1985 的同一分发点）：房间级信令，不进连接引擎
+		s.app.handleRoomNameSignal(sig.Type, data)
 		// 模组同步：mods_request 要现算/回传清单（可能几十秒），必须离开信令分发线程
 		// ——与模组把 bind/allocate 丢给 TURN_BG_EXECUTOR 是同一条教训（审计 P1-2）。
 		s.app.modSyncHandleSignalAsync(sig.Type, sig.From, data)
