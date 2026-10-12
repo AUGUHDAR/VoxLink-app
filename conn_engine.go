@@ -134,9 +134,12 @@ type connEngine struct {
 	gTcpConn       net.Conn     // TCP 打洞得到的远端连接，被所有 MC 接入共享
 
 	// 打洞会话记账（终局判定）
-	punchRecvEver      bool // 整个会话是否收到过对端任何 UDP 包
-	predictionOffCount int  // PREDICTION_OFF 累计频次（封顶 50）
-	retryRound         int  // 持续重试轮次（零收包终局判定）
+	punchRecvEver      bool          // 整个会话是否收到过对端任何 UDP 包
+	predictionOffCount int           // PREDICTION_OFF 累计频次（封顶 50）
+	connStartMs        int64         // CM:6590 connectionStartTimeMs
+	connTimeoutSec     int           // CM:6625 connectionTimeoutSec
+	connTimeoutTimer   *sessionTimer // CM:6701 connectionTimeoutFuture
+	retryRound         int           // 持续重试轮次（零收包终局判定）
 	gLocalNat          natClass
 
 	// 智能自动中继编排器（模组 CM:12733-12747，字段含义逐项对应）
@@ -395,6 +398,8 @@ func (e *connEngine) teardown() {
 	watchStop := e.turnSwitchWatchStop
 	hbStop := e.hotstandbyKbStop
 	hotstandby := e.turnHotstandby
+	connTimer := e.connTimeoutTimer // CM:6804：会话结束撤掉总超时；锁内只摘表，取消动作放锁外
+	e.connTimeoutTimer = nil
 	e.turnBgMonitorStop = nil
 	e.turnSwitchWatchStop = nil
 	e.hotstandbyKbStop = nil
@@ -437,6 +442,9 @@ func (e *connEngine) teardown() {
 	}
 	if hotstandby != nil {
 		_ = hotstandby.Close()
+	}
+	if connTimer != nil {
+		connTimer.cancel()
 	}
 
 	// 尽力通知对端（模组离开时也发 disconnect）
@@ -1066,6 +1074,53 @@ func (e *connEngine) dropExtraPuncherByKey(key string, ep *guestExtraPuncher) {
 	e.mu.Unlock()
 }
 
+// armConnectionTimeout 对位 CM:6590-6627 + CM:6701-6727。
+// 到点只报"全局超时"这一件事实（模组的 showConnectFailed(global_timeout)）：
+// 不掐打洞循环，connectionCycleActive / 持续重试 / 自动中继导演照旧跑——
+// 这与用户裁决"任何 NAT 都不许提前结束，只有必定失败才提前结束"一致。
+func (e *connEngine) armConnectionTimeout(profile *punchProfile, joinerSym, hostSym bool) {
+	e.mu.Lock()
+	e.connStartMs = time.Now().UnixMilli() // CM:6590
+	timeoutSec := profile.connectionTimeoutSec
+	if joinerSym || hostSym { // CM:6605-6607
+		timeoutSec = profile.symmetricConnectionTimeoutSec
+	}
+	e.connTimeoutSec = timeoutSec // CM:6625
+	round := e.retryRound         // CM:6626 continuousRetryRound
+	sess := e.sess
+	e.mu.Unlock()
+
+	if joinerSym || hostSym {
+		e.app.netLog("info", "global_timeout_extended") // CM:6609-6615（值走日志字段，不本地化）
+	}
+	if round != 0 {
+		return
+	}
+	t := newSessionTimer(
+		func() bool { e.mu.Lock(); defer e.mu.Unlock(); return e.gP2PDone },                    // CM:6715 connectionWon
+		func() bool { e.mu.Lock(); defer e.mu.Unlock(); return e.gActive },                     // CM:6717 connectionCycleActive
+		func() bool { e.mu.Lock(); defer e.mu.Unlock(); return sess != nil && e.sess == sess }, // CM:6717 currentRoom == state
+	)
+	e.mu.Lock()
+	e.connTimeoutTimer = t
+	e.mu.Unlock()
+	t.arm(timeoutSec, func(final int) {
+		e.app.netLog("warn", "voxlink.connection.global_timeout")
+		e.notifyState(phaseP2P, statusFailed, "", "voxlink.connection.global_timeout") // CM:6719-6721
+	})
+}
+
+// cancelConnectionTimeout 对位 CM:5163（胜利）与 CM:6804（会话清理）的 cancel。
+func (e *connEngine) cancelConnectionTimeout() {
+	e.mu.Lock()
+	t := e.connTimeoutTimer
+	e.connTimeoutTimer = nil
+	e.mu.Unlock()
+	if t != nil {
+		t.cancel()
+	}
+}
+
 // guestWinP2P 打洞成功后的收尾：CAS 占位 → rudp 承载 → 本地桥 → 成功事件。
 // 主 puncher 与 CM:3406-3425 的 joiner_extra_* 生日 puncher 共用这一段（模组两边都调
 // establishUdpTransport），所以必须是同一个函数体而不是两份复制。
@@ -1144,7 +1199,12 @@ func (e *connEngine) guestWinP2P(gen int, p *puncher, sock *net.UDPConn, authKey
 	e.gRudp = rc
 	e.gBridge = bridge
 	e.gP2PDone = true
+	wonTimer := e.connTimeoutTimer // CM:5163：本端已胜出，撤总超时；锁内只摘表
+	e.connTimeoutTimer = nil
 	e.mu.Unlock()
+	if wonTimer != nil {
+		wonTimer.cancel()
+	}
 	p.cancel() // 关掉组内未赢 socket（winConn 除外）
 	if winConn != sock {
 		_ = sock.Close()
@@ -1301,6 +1361,11 @@ func (e *connEngine) guestPunchFlow(gen int, offer map[string]any, from string) 
 	// 档位推荐 + punchAuthV1 密钥
 	profile := recommendProfile(localNat, remoteNat)
 	punchProfileSwitch(profile, "nat_matrix_"+localNat.String()+"x"+remoteNat.String())
+
+	// CM:6445 runConnectionCycle 内 6590-6627：记会话起点，"任一侧对称"取 75~110s、
+	// 否则取档位 45~65s，作为会话级总超时挂一次（只在第 0 轮挂；模组用的就是
+	// 刚定下来的 punchProfile()，所以挂点必须排在档位选定之后）。
+	e.armConnectionTimeout(profile, localNat.symmetric(), sigBool(offer, "hostSymmetric"))
 	e.app.netLog("info", "NAT 分级 local="+localNat.String()+" remote="+remoteNat.String()+" → 档位 "+profile.name)
 
 	// CM:6576-6586 Layer2：分完档就预热中继拓扑——对称 NAT 或两端同在一层 CGNAT 时，

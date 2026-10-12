@@ -344,6 +344,9 @@ func newSessionTimer(won, active, same func() bool) *sessionTimer {
 
 // arm = CM:6701-6727。timeoutSec<=0 与 Java 一样仍会排期（Java 未做 <=0 判断），
 // 但 Go 的 time.AfterFunc 非正数会立即触发，故由调用方保证传 CM:6599/6607 的原值。
+// sessionTimeoutUnit 只是把"秒"这个单位抽出来给用例拨表（值恒为 time.Second，语义不变）。
+var sessionTimeoutUnit = time.Second
+
 func (t *sessionTimer) arm(timeoutSec int, onTimeout func(finalTimeoutSec int)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -351,7 +354,7 @@ func (t *sessionTimer) arm(timeoutSec int, onTimeout func(finalTimeoutSec int)) 
 		t.timer.Stop() // CM:6705 cancel(false)：已在跑的回调不抢占
 	}
 	sec := timeoutSec // CM:6711 finalTimeoutSec
-	t.timer = time.AfterFunc(time.Duration(sec)*time.Second, func() {
+	t.timer = time.AfterFunc(time.Duration(sec)*sessionTimeoutUnit, func() {
 		if t.won != nil && t.won() { // CM:6715
 			return
 		}
