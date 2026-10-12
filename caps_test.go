@@ -8,14 +8,17 @@ import (
 )
 
 // TestCurrentCapabilitiesDeclared 本端最终声明的能力集合：
-// relay / ice_restart / continuous_retry / punchAuthV1 / stdTurnV1 / relayMuxV1；
-// overlayAuthV1 / modSyncV1 门控关闭（未接入），不得出现在上报里。
+// relay / ice_restart / continuous_retry / punchAuthV1 / overlayAuthV1 / stdTurnV1 / relayMuxV1；
+// overlayAuthV1 与模组一致无条件声明（ProtocolNegotiator.java:45），验签路径已在收包处生效
+// （overlay_auth_test.go）；modSyncV1 走配置门控另行追加（SignalingClient.java:202-211），
+// 所以不得出现在这份静态表里。
 func TestCurrentCapabilitiesDeclared(t *testing.T) {
 	want := []string{
 		capNameRelay,
 		capNameIceRestart,
 		capNameContinuousRetry,
 		capNamePunchAuthV1,
+		capNameOverlayAuthV1,
 		capNameStdTurnV1,
 		capNameRelayMuxV1,
 	}
@@ -26,10 +29,10 @@ func TestCurrentCapabilitiesDeclared(t *testing.T) {
 	if !reflect.DeepEqual(appCapabilities, want) {
 		t.Errorf("appCapabilities = %v, want %v", appCapabilities, want)
 	}
-	for _, banned := range []string{capNameOverlayAuthV1, capNameModSyncV1} {
+	for _, banned := range []string{capNameModSyncV1} {
 		for _, c := range got {
 			if c == banned {
-				t.Errorf("未实现能力 %s 不得声明", c)
+				t.Errorf("配置门控能力 %s 不得写进静态表", c)
 			}
 		}
 	}

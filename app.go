@@ -56,8 +56,13 @@ const (
 	capImplementedContinuousRetry = true
 	// punchAuthV1：punch_auth.go 打洞控制报文与数据面帧的截断 HMAC-SHA256 已实现。
 	capImplementedPunchAuthV1 = true
-	// overlayAuthV1：overlay 链路握手/中继报文来源认证——后续轮次接入，届时翻真。
-	capImplementedOverlayAuthV1 = false
+	// overlayAuthV1：overlay 链路握手/中继报文的来源验签已实现并在收包路径生效
+	// （overlay.go linkKeyFor→overlayVerifyAndStripPacket→authDropCount，对位
+	// P2POverlayManager.java:350-395/:237-285；用例 overlay_auth_test.go）。
+	// 模组把它无条件写进 CURRENT_CAPABILITIES（ProtocolNegotiator.java:45），本端同声明；
+	// 密钥注入点 setLinkKeyForPeer 在模组 28 个模板里没有任何调用点，本端也保持不注入，
+	// 于是两端线上行为一致：未注入密钥的来源按旧行为放行（:61-62）。
+	capImplementedOverlayAuthV1 = true
 	// modSyncV1：modsync_*.go（并行 agent）"必装 Mod 清单"发布/拉取——接入前不声明；
 	// 对齐模组语义（SignalingClient.java:204-208）：未声明时房客按旧版房主秒判"无清单"直通。
 	capImplementedModSyncV1 = false
