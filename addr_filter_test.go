@@ -121,7 +121,7 @@ func TestHostOnPunchInfoFamilyFilterAndSameCgnat(t *testing.T) {
 		}
 	})
 
-	t.Run("同一公网 IP：判定同 CGNAT，并按 CM:4421 带出 hostLocalIp", func(t *testing.T) {
+	t.Run("同一公网 IP：判定同 CGNAT，阵列通告按 CM:4421 带出 hostLocalIp", func(t *testing.T) {
 		if getLocalIP() == "" {
 			t.Skip("这台机器没有默认路由出口（CI/无网卡环境），hostLocalIp 无从断言")
 		}
@@ -134,16 +134,15 @@ func TestHostOnPunchInfoFamilyFilterAndSameCgnat(t *testing.T) {
 		if !peer.sameCgnat {
 			t.Fatal("两端映射同一公网 IP 必须判同 CGNAT（CM:3659-3665）")
 		}
-		var mapped *capturedSignal
-		for i := range out {
-			if out[i].Type == "holepunch_mapped" {
-				mapped = &out[i]
+		for _, s := range out {
+			if s.Type == "holepunch_mapped" {
+				t.Fatal("模组把通告放在多 socket 阵列之后（CM:4389-4457），信令处理这条不该再发")
 			}
 		}
-		if mapped == nil {
-			t.Fatal("没收到 holepunch_mapped")
-		}
-		if lip, _ := mapped.Data["hostLocalIp"].(string); lip == "" {
+		// CM:4421 的门现在由阵列读：sameCgnat 或房客索要才发 hostLocalIp
+		arr := &hostArrayResult{addrs: []*stunMappedAddr{{IP: "45.67.89.40", Port: 21000}}}
+		p := hostMappedPayload(arr, false, peer.sameCgnat, peer.requestHostLocalIp)
+		if lip, _ := p["hostLocalIp"].(string); lip == "" {
 			t.Fatal("同 CGNAT 时必须把 hostLocalIp 交给房客（公网映射打不通，只有内网直连能用）")
 		}
 	})
@@ -151,20 +150,17 @@ func TestHostOnPunchInfoFamilyFilterAndSameCgnat(t *testing.T) {
 	t.Run("既没索要也不同 CGNAT：不发 hostLocalIp", func(t *testing.T) {
 		peer := &hostPeer{id: "guest-7", hostMapped: &stunMappedAddr{IP: "45.67.89.40", Port: 21000}}
 		send := hostPunchInfoHarness(t, peer)
-		out := send(map[string]any{"joinerMappedIp": "98.76.54.32", "joinerMappedPort": 19000})
+		send(map[string]any{"joinerMappedIp": "98.76.54.32", "joinerMappedPort": 19000})
 		if peer.sameCgnat {
 			t.Fatal("公网 IP 不同不该判同 CGNAT")
 		}
-		for _, s := range out {
-			if s.Type != "holepunch_mapped" {
-				continue
-			}
-			if _, ok := s.Data["hostLocalIp"]; ok {
-				t.Fatalf("CM:4421 只在索要或同 CGNAT 时才发 hostLocalIp，实际 %+v", s.Data)
-			}
-			if hip, _ := s.Data["hostMappedIp"].(string); strings.Contains(hip, "2001:") {
-				t.Fatalf("回包不该带 IPv6：%+v", s.Data)
-			}
+		arr := &hostArrayResult{addrs: []*stunMappedAddr{{IP: "45.67.89.40", Port: 21000}}}
+		p := hostMappedPayload(arr, false, peer.sameCgnat, peer.requestHostLocalIp)
+		if _, ok := p["hostLocalIp"]; ok {
+			t.Fatalf("CM:4421 只在索要或同 CGNAT 时才发 hostLocalIp，实际 %+v", p)
+		}
+		if hip, _ := p["hostMappedIp"].(string); strings.Contains(hip, "2001:") {
+			t.Fatalf("通告不该带 IPv6：%+v", p)
 		}
 	})
 
@@ -174,16 +170,13 @@ func TestHostOnPunchInfoFamilyFilterAndSameCgnat(t *testing.T) {
 		}
 		peer := &hostPeer{id: "guest-6", hostMapped: &stunMappedAddr{IP: "45.67.89.40", Port: 21000}}
 		send := hostPunchInfoHarness(t, peer)
-		out := send(map[string]any{"joinerMappedIp": "98.76.54.32", "joinerMappedPort": 19000, "requestHostLocalIp": true})
-		var seen bool
-		for _, s := range out {
-			if s.Type == "holepunch_mapped" {
-				if lip, _ := s.Data["hostLocalIp"].(string); lip != "" {
-					seen = true
-				}
-			}
+		send(map[string]any{"joinerMappedIp": "98.76.54.32", "joinerMappedPort": 19000, "requestHostLocalIp": true})
+		if !peer.requestHostLocalIp {
+			t.Fatal("CM:3993 要把索要和同 CGNAT 记进本 peer，通告才发得出局域网地址")
 		}
-		if !seen {
+		arr := &hostArrayResult{addrs: []*stunMappedAddr{{IP: "45.67.89.40", Port: 21000}}}
+		p := hostMappedPayload(arr, false, peer.sameCgnat, peer.requestHostLocalIp)
+		if lip, _ := p["hostLocalIp"].(string); lip == "" {
 			t.Fatal("requestHostLocalIp=true 时必须带 hostLocalIp")
 		}
 	})

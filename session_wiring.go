@@ -28,10 +28,10 @@ func (a *App) autoUPnPEnabled() bool {
 
 // hostSessionStarted 房主建房成功后。模组的 createRoom 是 "instant create + NAT probe deferred"
 // （:161 的日志原文），探测与映射都不许挡住建房返回，所以整段放后台。
-func (a *App) hostSessionStarted(code, name string, hostPort int) {
+func (a *App) hostSessionStarted(code, name string, hostPort int, hostIp, hostIpv6 string) {
 	setActiveAppForTransport(a)
 	a.logUploadArm(code, true) // RoomManager.java:377
-	go a.hostNatMapAndProbe(code, name, hostPort)
+	go a.hostNatMapAndProbe(code, name, hostPort, hostIp, hostIpv6)
 }
 
 // guestSessionStarted 房客开始加入。模组在 AttemptingJoinScreen 打开时 arm（:258），
@@ -41,8 +41,8 @@ func (a *App) guestSessionStarted(code string) {
 	a.logUploadArm(code, false) // AttemptingJoinScreen.java:258
 }
 
-// hostNatMapAndProbe 后台那一整段（RoomManager.java:164-256）。
-func (a *App) hostNatMapAndProbe(code, name string, hostPort int) {
+// hostNatMapAndProbe 后台那一整段（RoomManager.java:164-256 + :467-524）。
+func (a *App) hostNatMapAndProbe(code, name string, hostPort int, hostIp, hostIpv6 string) {
 	effectivePort := hostPort
 	if a.autoUPnPEnabled() { // :166
 		tcp := upnpOpenPort(hostPort, name)           // :173
@@ -68,6 +68,9 @@ func (a *App) hostNatMapAndProbe(code, name string, hostPort int) {
 	}
 
 	a.applyDeferredNat(code, natType, effectivePort)
+	// 端口可达性：模组在 :467-524 用 UPnP 后的 ctx.port 去问服务端 /stun/check。
+	// 房主侧多 socket 阵列的规模要读这个结论（CM:3941-3943）。
+	a.probeCreatedRoomPorts(hostIp, hostIpv6, effectivePort)
 }
 
 // applyDeferredNat 对应 :204-256：把探测结果写回本地房间信息并 updateRoom 一次；

@@ -87,17 +87,20 @@ func (e *connEngine) notifyState(phase, status, address, detail string) {
 
 // hostPeer host 侧单个房客的连接上下文。
 type hostPeer struct {
-	id              string
-	caps            []string // join_request 携带的加入者能力表
-	protoVersion    int      // join_request 携带的 clientProtocolVersion，0=旧版（RoomInfo.java:243-245 的 legacy 判据）
-	natClass        natClass // punch_info 上报的加入者 NAT 分级
-	joinerPortRange int      // punch_info 上报的加入者预测范围（反向打洞用）
-	puncher         *puncher
-	rudp            *rudpConn
-	mapped          *stunMappedAddr // joiner 映射地址（punch_info 上报）
-	hostMapped      *stunMappedAddr // 我方打洞 socket 映射（offer 时缓存）
-	hostDelta       int
-	sameCgnat       bool // 两端映射同一公网 IP（CM:3659-3665）
+	id                 string
+	caps               []string // join_request 携带的加入者能力表
+	protoVersion       int      // join_request 携带的 clientProtocolVersion，0=旧版（RoomInfo.java:243-245 的 legacy 判据）
+	natClass           natClass // punch_info 上报的加入者 NAT 分级
+	joinerSym          bool     // punch_info 的 joinerSymmetric 原值（CM:3871，阵列规模与扫窗带宽都读它）
+	requestHostLocalIp bool     // punch_info 是否索要局域网地址（CM:3993）
+	joinerPortRange    int      // punch_info 上报的加入者预测范围（反向打洞用）
+	puncher            *puncher
+	punching           bool // CM:2747 HostPunchContext.punching：阵列通告的漂移重发只在打洞进行中继续发
+	rudp               *rudpConn
+	mapped             *stunMappedAddr // joiner 映射地址（punch_info 上报）
+	hostMapped         *stunMappedAddr // 我方打洞 socket 映射（offer 时缓存）
+	hostDelta          int
+	sameCgnat          bool // 两端映射同一公网 IP（CM:3659-3665）
 }
 
 type connEngine struct {
@@ -132,6 +135,11 @@ type connEngine struct {
 	gP2PDone       bool
 	gTcpLn         net.Listener // TCP 打洞（tcp_punch.go）成功后的本地代理监听
 	gTcpConn       net.Conn     // TCP 打洞得到的远端连接，被所有 MC 接入共享
+
+	// 房主侧阵列状态：roomHostSym 对 RoomInfo.hostSymmetric（CM:4290 写、CM:4421/4599 读），
+	// scenarioTier 对 ConnectionManager.scenarioTier（CM:4306 写、CM:3965 读）。
+	roomHostSym  bool
+	scenarioTier scenarioTier
 
 	// 打洞会话记账（终局判定）
 	punchRecvEver      bool          // 整个会话是否收到过对端任何 UDP 包
@@ -1923,6 +1931,68 @@ func (e *connEngine) onPeerDisconnect(from string) {
 
 // ---- host：打洞应答与桥接 ----
 
+// roomNatType = RoomInfo.getNatType()（本房间记录里那份 NAT 结论，建房时由 STUN 精探写回）。
+func (e *connEngine) roomNatType() string {
+	e.mu.Lock()
+	sess := e.sess
+	e.mu.Unlock()
+	if sess == nil || sess.app == nil {
+		return ""
+	}
+	sess.app.mu.Lock()
+	defer sess.app.mu.Unlock()
+	if sess.app.room == nil {
+		return ""
+	}
+	if s, ok := sess.app.room["natType"].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// roomNatTypeSymmetric = ConnectionManager.java:3867 的
+// StunDetector.isNatTypeSymmetric(state.roomInfo.getNatType())。
+func (e *connEngine) roomNatTypeSymmetric() bool {
+	return stunNatTypeFromKey(e.roomNatType()).symmetric()
+}
+
+// setRoomNatType 对位 CM:4332 的 roomInfo.setNatType("symmetric_easy_inc")：
+// 只改当前会话那间房。
+func (e *connEngine) setRoomNatType(natType string) {
+	e.mu.Lock()
+	sess := e.sess
+	e.mu.Unlock()
+	if sess == nil || sess.app == nil {
+		return
+	}
+	sess.app.mu.Lock()
+	if sess.app.room != nil {
+		sess.app.room["natType"] = natType
+	}
+	sess.app.mu.Unlock()
+}
+
+// roomHostSymmetric / setRoomHostSymmetric = RoomInfo.isHostSymmetric()/setHostSymmetric(true)
+// （CM:4288 的升级判据与 CM:4421/4599 的读取点）。房主侧自己给自己盖章。
+func (e *connEngine) roomHostSymmetric() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.roomHostSym
+}
+
+func (e *connEngine) setRoomHostSymmetric(v bool) {
+	e.mu.Lock()
+	e.roomHostSym = v
+	e.mu.Unlock()
+}
+
+// connectionWonFor = CM:4268 的 connectionWon.get()：这个房客已经有链路了。
+func (e *connEngine) connectionWonFor(peer *hostPeer) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return peer != nil && peer.rudp != nil
+}
+
 // hostOnJoinRequest 收到（服务端代发的）join_request → 起 host 侧引擎。
 func (e *connEngine) hostOnJoinRequest(from string, data map[string]any) {
 	e.mu.Lock()
@@ -2100,6 +2170,44 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 	punchProfileSwitch(profile, "host_nat_matrix_"+hostNat.String()+"x"+joinerNat.String())
 	e.app.netLog("info", "host NAT 分级 local="+hostNat.String()+" joiner="+joinerNat.String()+" → 档位 "+profile.name)
 
+	// ---- 房主侧多 socket STUN 阵列（CM:3941-4457）----
+	// 产出 hostMappedPorts 给房客的生日多端口扇出用；阵列自己检出对称时还会升级 NAT 判定和档位。
+	group, arr, profile := e.hostMappedArray(profile, sock, peer, hostNat, joinerNat, stunDiscoverMappedAddressDual)
+	e.mu.Lock()
+	hostNat = e.hostNatClass // CM:4298 升级写的是 this.localNatClass，后续分支都读升级后的值
+	e.mu.Unlock()
+	// CM:4547-4549：只有 joiner 自报对称、或双方都对称时才给扫窗带宽，否则只打已知端口
+	// （模组注释：对称 CGNAT 上扫射会炸出 socket数×端口数 个未知映射触发洪泛保护，双向全丢）。
+	e.mu.Lock()
+	joinerSymFlag := peer.joinerSym
+	e.mu.Unlock()
+	hostSweep := hostRoundPeerRange(profile, joinerSymFlag, hostNat.symmetric(), joinerNat.symmetric())
+	e.mu.Lock()
+	peer.punching = true // CM:4467 hostPunchContext.punching = true
+	e.mu.Unlock()
+	// 出口统一收口：阵列里的源端口整组处置，赢家用 keep（CM:4274-4284/4519-4531）。
+	closeGroup := func(keep *net.UDPConn) {
+		for _, c := range group {
+			if c != nil && c != keep {
+				_ = c.Close()
+			}
+		}
+	}
+	defer func() {
+		e.mu.Lock()
+		peer.punching = false // CM:4511 timeoutCtx.punching = false
+		e.mu.Unlock()
+	}()
+	driftStop := make(chan struct{})
+	defer close(driftStop)
+	if hostDriftSyncNeeded(arr, e.roomHostSymmetric()) { // CM:4599
+		go e.hostDriftResync(peer.id, arr, func() bool {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			return e.hPeers[peer.id] == peer && peer.punching && peer.rudp == nil
+		}, driftStop)
+	}
+
 	params := punchParamsFromProfile(profile)
 	var lastFailure *punchFailureReason
 	var lastResult *punchResult
@@ -2108,7 +2216,7 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 	for time.Now().Before(deadlineMs) {
 		select {
 		case <-e.ctxDone():
-			_ = sock.Close()
+			closeGroup(nil)
 			return
 		default:
 		}
@@ -2118,45 +2226,29 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 		mapped := peer.mapped
 		e.mu.Unlock()
 		if cur != peer || won {
-			_ = sock.Close()
+			closeGroup(nil)
 			return
 		}
 		if mapped == nil {
-			_ = sock.Close()
+			closeGroup(nil)
 			return
 		}
 
 		params = tunerNextParams(profile, hostNat, joinerNat, cycle, effectiveMaxCycles(profile, stunGetCachedResult()), lastFailure, lastResult)
 		strategy := selectStrategy(hostNat, joinerNat, cycle, false)
-
-		p := newPuncher(sock, profile, params, authKey)
-		p.setLogf(e.app.netLog)
-		p.setTarget(udpAddrOf(mapped))
-		p.setOnPeer(func(addr *net.UDPAddr) {
-			_ = e.sendSignal("peer_port", map[string]any{"peer_ip": addr.IP.String(), "peer_port": addr.Port}, peer.id)
-		})
+		sweep := hostSweep
+		if strategy == strategyReverseOnly && cycle == 0 {
+			sweep = 0 // 反向优先那一轮只打已知端口（本端既有口径）
+		}
+		// CM:4701-4849：组里每个 socket 各打一枪，赢的那个留下、其余收流
+		p, res := e.hostPunchRound(group, profile, params, authKey, mapped, sweep, peer.id)
+		if p == nil {
+			closeGroup(nil)
+			return
+		}
 		e.mu.Lock()
 		peer.puncher = p
 		e.mu.Unlock()
-
-		e.mu.Lock()
-		joinerRange := peer.joinerPortRange
-		e.mu.Unlock()
-		if joinerRange <= 0 {
-			joinerRange = params.portRange
-		}
-		var res *punchResult
-		switch {
-		case profile == punchHardSym:
-			group := makePunchSocketGroup(sock, profile.hardSymSocketCount)
-			res = p.punchGroup(group, 0)
-		case strategy == strategyReverseOnly && cycle == 0:
-			res = p.punchPrediction(mapped.Port, 0, false)
-		case joinerRange <= 0:
-			res = p.punchPrediction(mapped.Port, 0, false)
-		default:
-			res = p.punchPrediction(mapped.Port, joinerRange, false)
-		}
 
 		if res != nil && res.success {
 			winConn, actual := p.win()
@@ -2180,17 +2272,15 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 				e.mu.Unlock()
 				_ = rc.Close()
 				p.cancel()
-				_ = sock.Close()
+				closeGroup(nil)
 				return
 			}
 			peer.rudp = rc
 			peer.puncher = nil
 			mcPort := e.hostPort
 			e.mu.Unlock()
-			p.cancel() // 关组内未赢 socket
-			if winConn != sock {
-				_ = sock.Close()
-			}
+			p.cancel()          // 收掉本 puncher 的接收协程（组内 socket 由下一行统一处置）
+			closeGroup(winConn) // CM:4274-4284：赢家留着，其余源端口全部关掉
 			e.app.netLog("info", "host 端 rudp 隧道已建立，等待 MC 握手")
 			startHostLazyBridge(rc, mcPort, e.app.netLog)
 			return
@@ -2212,12 +2302,12 @@ func (e *connEngine) hostServeJoin(peer *hostPeer, hostPort int) {
 
 		select {
 		case <-e.ctxDone():
-			_ = sock.Close()
+			closeGroup(nil)
 			return
 		case <-time.After(punchCycleInterval):
 		}
 	}
-	_ = sock.Close()
+	closeGroup(nil)
 	e.mu.Lock()
 	cur := e.hPeers[peer.id]
 	if cur == peer && cur.rudp == nil {
@@ -2280,13 +2370,11 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 	var cgnatHit bool
 	e.mu.Lock()
 	peer := e.hPeers[from]
-	var hm *stunMappedAddr
-	var hd int
-	var sc bool
 	if peer != nil {
 		if ip != "" && port > 0 {
 			peer.mapped = &stunMappedAddr{IP: ip, Port: port}
 		}
+		peer.requestHostLocalIp = requestHostLocalIp // CM:3993 fRequestHostLocalIp，阵列通告要不要带局域网地址
 		// CM:3659-3665：两端映射到同一个公网 IP = 同一层 CGNAT 后面。
 		// 朝这个公网映射打洞是白打（包出去就被自家 NAT 弹回来），模组在这里留 warn，
 		// 并让后续"要不要发局域网地址/提前备中继"都按这个事实走。
@@ -2296,6 +2384,7 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 		}
 		// joiner 对称标志 + delta/range（反向打洞预测用；easySym 为对端权威判定）
 		if sigBool(data, "joinerSymmetric") {
+			peer.joinerSym = true // CM:3871 原值，阵列规模与扫窗带宽按它走
 			peer.natClass = natHardSym
 			if sigBool(data, "joinerEasySym") || absInt(sigInt(data, "joinerMappedPortDelta")) < 100 {
 				peer.natClass = natEasySym
@@ -2306,9 +2395,6 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 		if r := sigInt(data, "joinerMappedPortRange"); r > 0 {
 			peer.joinerPortRange = r
 		}
-		// 我方映射是本 goroutine 之外写入的，必须在这把锁里取快照
-		hm, hd = peer.hostMapped, peer.hostDelta
-		sc = peer.sameCgnat
 	}
 	e.mu.Unlock()
 	if peer == nil {
@@ -2318,26 +2404,9 @@ func (e *connEngine) hostOnPunchInfo(from string, data map[string]any) {
 		e.app.netLog("warn", fmt.Sprintf("[HostPunchInfo] Same public IP (%s): both behind same CGNAT", ip))
 	}
 
-	// 回 holepunch_mapped（对齐模组字段：hostMappedIp/hostMappedPort/hostMappedPorts）
-	mappedData := map[string]any{}
-	if hm != nil {
-		mappedData["hostMappedIp"] = hm.IP
-		mappedData["hostMappedPort"] = hm.Port
-		mappedData["hostMappedPorts"] = []int{hm.Port}
-		if hd != 0 {
-			mappedData["hostMappedPortDelta"] = hd
-		}
-	}
-	// CM:4421：局域网地址只在"房客索要"或"两端同 CGNAT"时才发——同一层 NAT 时公网映射
-	// 必然打不通，能走通的只有内网直连，这时把 hostLocalIp 交出去才有意义。
-	if requestHostLocalIp || sc {
-		if lip := getLocalIP(); lip != "" {
-			mappedData["hostLocalIp"] = lip
-		}
-	}
-	if err := e.sendSignal("holepunch_mapped", mappedData, from); err != nil {
-		e.app.netLog("warn", "发送 holepunch_mapped 失败: "+err.Error())
-	}
+	// 模组不在这里回 holepunch_mapped：它是在这条信令里就地起多 socket 阵列，
+	// 阵列做完双 STUN 才把 hostMappedPorts 一起发出去（CM:4389-4457）。
+	// 应用端那段落在 hostServeJoin 的阵列步骤里，这里只做上面的入参登记。
 
 	// 打洞进行中：刷新目标（对端纠偏/漂移）
 	e.mu.Lock()

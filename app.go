@@ -401,6 +401,7 @@ func (a *App) clearSession(s *session) {
 		a.room = nil
 		a.slotTaken = false
 		had = true
+		resetPortStatusOnLeave() // 端口可达性结论属于这一间房，下一间要重新探（模组随 roomInfo 销毁）
 	}
 	a.mu.Unlock()
 	// 模组的拆除点是 stopScheduledTasks（RoomManager.java:1105）→ app 侧等价落点就是这里。
@@ -771,6 +772,7 @@ func (a *App) CreateRoom(reqJSON string) string {
 		HostToken string `json:"hostToken"`
 		Name      string `json:"name"`
 		HostIP    string `json:"hostIp"`
+		HostIPv6  string `json:"hostIpv6"` // RoomManager.java:474 的 ipv6 可达性探测要用
 		HostPort  int    `json:"hostPort"`
 		ExpiresIn int    `json:"expiresIn"`
 		// Fed：服务端为本房开的 Happy Link 镜像凭据（RoomManager.java:359 用 isJsonObject 判定，
@@ -803,8 +805,8 @@ func (a *App) CreateRoom(reqJSON string) string {
 	}
 	sessionStarted = true
 	a.startSession(data.Code, data.HostToken, true, room, "")
-	a.modSyncOnRoomCreated()                                // 建房成功后立即后台构建两档清单（ModSyncManifestService 的 onRoomCreated）
-	a.hostSessionStarted(data.Code, req.Name, req.HostPort) // 模组同位置：UPnP 映射 + STUN 精探 + 日志样本登记
+	a.modSyncOnRoomCreated()                                                            // 建房成功后立即后台构建两档清单（ModSyncManifestService 的 onRoomCreated）
+	a.hostSessionStarted(data.Code, req.Name, req.HostPort, data.HostIP, data.HostIPv6) // 模组同位置：UPnP + STUN 精探 + 端口可达性 + 日志样本登记
 
 	return wrapOK(map[string]any{
 		"code":      data.Code,
