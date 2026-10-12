@@ -20,8 +20,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"net/url"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -93,6 +91,8 @@ func (e *connEngine) usePlayerRelay() error {
 	e.rResult = make(chan string, 4)
 	e.rDone = false
 	e.mu.Unlock()
+	// CM:1396-1402：进入玩家中继就起 90 秒总闸，防房主侧 8 秒批次递归无限重试。
+	e.relayBeginManualRelay()
 
 	e.notifyState(phasePrelay, statusTrying, "", "")
 	if err := e.sendSignal("relay_request", map[string]any{"clientId": clientID}, "host"); err != nil {
@@ -155,6 +155,9 @@ func (e *connEngine) guestRelayFail(attempt int64, reason string) {
 	e.rRudp = nil
 	e.rBridge = nil
 	e.mu.Unlock()
+	// 收口批次追踪与 90 秒总闸（CM:11138）；60 秒失败名单保留，
+	// 下一批要靠它跳过刚失败的那个（CM:10779-10786）。
+	e.relayEndManualRelay()
 
 	if puncher != nil {
 		puncher.stop()
@@ -366,14 +369,9 @@ func (e *connEngine) relayBridgeDown() {
 
 // ---- host：relay_request 派发 ----
 
-// relayCandidate /relay/candidates 返回的候选。
-type relayCandidate struct {
-	ClientID   string `json:"clientId"`
-	RoomCode   string `json:"roomCode"`
-	NatType    string `json:"natType"`
-	MappedIP   string `json:"mappedIp"`
-	MappedPort int    `json:"mappedPort"`
-}
+// 跨房全局候选池的三件旧物（relayCandidate / fetchRelayCandidates / pickRelayCandidate）已随模组退役：
+// 模组在 CM:10879-10883 明确注释这条池会把别的房间的人派进本房当中继点（跨房串流污染），
+// 现改为本房成员内挑选（relay_candidates.go 的 pickRelayCandidates），旧路径整体删除。
 
 // hostOnRelayRequest 房主收到 relay_request：挑选候选中继者并派发。
 func (e *connEngine) hostOnRelayRequest(from string, data map[string]any) {
@@ -381,7 +379,7 @@ func (e *connEngine) hostOnRelayRequest(from string, data map[string]any) {
 
 	e.mu.Lock()
 	requester := e.hPeers[from]
-	selfID := e.clientID
+	sess := e.sess
 	roomCode := e.code
 	// mapped 由 hostOnPunchInfo 在锁内写，这里也必须锁内取（L5 同类）
 	var reqIP string
@@ -397,95 +395,32 @@ func (e *connEngine) hostOnRelayRequest(from string, data map[string]any) {
 		return
 	}
 
-	cands, err := e.fetchRelayCandidates(roomCode)
-	if err != nil {
-		e.app.netLog("warn", "查询中继候选失败: "+err.Error())
-	}
-	cand := e.pickRelayCandidate(cands, from, selfID)
-	if cand == nil {
-		e.app.netLog("warn", "无可用中继候选，拒绝 relay_request")
-		_ = e.sendSignal("relay_declined", map[string]any{}, from)
-		return
-	}
-
-	// replyHostId：候选若也是房主（host-<CODE>）没有"自家房主"可回执，只能按这个 id 直投回来
-	setup := map[string]any{
-		"targetClientId": from,
-		"targetIp":       reqIP,
-		"targetPort":     reqPort,
-		"replyHostId":    "host-" + strings.ToUpper(roomCode),
-	}
-	if err := e.sendSignal("relay_setup", setup, cand.ClientID); err != nil {
-		e.app.netLog("warn", "发送 relay_setup 失败: "+err.Error())
-	}
-	// 给 requester 回 relay_notify（候选的映射地址）
-	notify := map[string]any{
-		"relayIp":   cand.MappedIP,
-		"relayPort": cand.MappedPort,
-	}
-	if err := e.sendSignal("relay_notify", notify, from); err != nil {
-		e.app.netLog("warn", "发送 relay_notify 失败: "+err.Error())
-	}
-	e.app.netLog("info", "中继派发完成")
-}
-
-// fetchRelayCandidates GET /relay/candidates?excludeRoom=<本房>：候选池=除本房外所有房间
-// 里 relayEnabled 且非对称 NAT 的人；不能带 roomCode（带了就只返回本房成员）。
-func (e *connEngine) fetchRelayCandidates(selfRoom string) ([]relayCandidate, error) {
-	var data struct {
-		Candidates []relayCandidate `json:"candidates"`
-	}
-	q := url.Values{}
-	if selfRoom != "" {
-		q.Set("excludeRoom", strings.ToUpper(selfRoom))
-	}
-	if err := e.app.api.get(e.app.baseURL(), "/relay/candidates", q, &data); err != nil {
-		return nil, err
-	}
-	return data.Candidates, nil
-}
-
-// pickRelayCandidate 过滤候选并按本会话已派发次数升序取最闲的一个（服务端已洗牌，
-// 同载荷时保持服务端顺序即可，不要退化成"永远选第一个"）。
-func (e *connEngine) pickRelayCandidate(cands []relayCandidate, requesterID, selfID string) *relayCandidate {
-	e.mu.Lock()
-	dispatched := e.hRelayDispatched
-	ownHostID := "host-" + strings.ToUpper(e.code)
-	peers := make(map[string]bool, len(e.hPeers))
-	for id := range e.hPeers {
-		peers[id] = true
-	}
-	e.mu.Unlock()
-
-	ntOK := make([]relayCandidate, 0, len(cands))
-	for _, c := range cands {
-		// 服务端不回传 roomCode，同房成员只能在本地按在册房客表剔掉
-		if c.ClientID == "" || c.ClientID == requesterID || c.ClientID == selfID || c.ClientID == ownHostID || peers[c.ClientID] {
-			continue
+	// 模房的跨房全局候选池（CM:10879-10883 的注释判定它会造成跨房串流污染，已永久停用）。
+	// 这里按模组口径改为**只在本房间内**挑：已建立且开启 mux 的锥型中继者、
+	// 60 秒失败黑名单、一批最多 3 个并行、8 秒无回音整批拉黑后递归下一批、90 秒总闸兜底。
+	e.relayDispatchOnce(sess, from, reqIP, reqPort, func(batch []*hostPeer, index, size int) {
+		// CM:10719-10726：每批留痕"第 N 轮 / M 个候选"。本端是机器可读口径，
+		// 只给键与计数（房主界面没有中继按钮，1.2.0 起手动按钮已退役）。
+		e.app.netLog("info", fmt.Sprintf("relay_batch_index=%d relay_batch_size=%d", index, size))
+		for _, c := range batch {
+			setup := map[string]any{
+				"targetClientId": from,
+				"targetIp":       reqIP,
+				"targetPort":     reqPort,
+				// CM:11437-11443 relayPeerId：房主有 clientId 用 clientId，否则 "host-<CODE>"。
+				// 房主侧没有 clientId（/room/create 不分配），所以这里恒为后者。
+				"replyHostId": "host-" + strings.ToUpper(roomCode),
+			}
+			if err := e.sendSignal("relay_setup", setup, c.id); err != nil {
+				e.app.netLog("warn", "发送 relay_setup 失败: "+err.Error())
+			}
+			notify := map[string]any{"relayIp": c.mapped.IP, "relayPort": c.mapped.Port}
+			if err := e.sendSignal("relay_notify", notify, from); err != nil {
+				e.app.netLog("warn", "发送 relay_notify 失败: "+err.Error())
+			}
 		}
-		if c.MappedIP == "" || c.MappedPort <= 0 {
-			continue
-		}
-		nt := strings.ToLower(c.NatType)
-		if nt == "" || strings.Contains(nt, "sym") || strings.Contains(nt, "strict") || strings.Contains(nt, "unknown") {
-			continue
-		}
-		ntOK = append(ntOK, c)
-	}
-	if len(ntOK) == 0 {
-		return nil
-	}
-	sort.SliceStable(ntOK, func(i, j int) bool {
-		return dispatched[ntOK[i].ClientID] < dispatched[ntOK[j].ClientID]
+		e.app.netLog("info", "中继派发完成")
 	})
-	best := ntOK[0]
-	e.mu.Lock()
-	if e.hRelayDispatched == nil {
-		e.hRelayDispatched = map[string]int{}
-	}
-	e.hRelayDispatched[best.ClientID]++
-	e.mu.Unlock()
-	return &best
 }
 
 // hostOnRelayAccept 候选者回执：把被中继会话挂到候选者 joiner 传输的 mux 子通道上，
@@ -529,6 +464,9 @@ func (e *connEngine) hostOnRelayAccept(from string, data map[string]any) {
 	if err := e.sendSignal("relay_notify", map[string]any{"connected": true}, forClientID); err != nil {
 		e.app.netLog("warn", "转发 relay_notify 失败: "+err.Error())
 	}
+	// CM:11138：这批有了结果就收口——撤 8 秒批次计时、清 current，
+	// 否则 current 常驻会让后续派发被"Relay already trying"那道门永久挡掉。
+	e.relayEndManualRelay()
 }
 
 // ---- 我们作为中继节点（guest 收 relay_setup）----

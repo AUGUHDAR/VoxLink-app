@@ -1,10 +1,12 @@
 package main
 
-// relay_test.go — 玩家中继的房主侧契约（对齐模组 1.1.9 的候选池裁决 + 1.2.0 的 v2 数据面）：
-//   - 候选池 = 除本房外所有房间里 relayEnabled 且非对称 NAT 的人（excludeRoom 自报）
-//   - 派发按"本会话已用过几次"挑最闲的候选，不退化成永远取第一个
+// relay_test.go — 玩家中继的房主侧契约（对齐模组 1.2.0 的 v2 数据面与房内候选裁决）：
+//   - 候选只从**本房成员**里挑：已建立且开启 mux 的锥型中继者（CM:10577-10615）；
+//     跨房全局池那条路已被模组判为跨房串流污染并退役（CM:10879-10883）
+//   - 一批最多 3 个并行、先按承载量再按 RTO 排序（CM:10639-10663）
+//   - 单批 8 秒无结果整批进 60 秒黑名单并递归下一批，总闸 90 秒（CM:10511-10793）
 //   - relay_setup 带 replyHostId，relay_accept 必须转告自家房客
-//   - 1.2.0：relay_accept 必须带 chan，且候选者传输已 mux 化，否则一律不报 connected
+//   - relay_accept 必须带 chan 且候选者传输已 mux 化，否则一律不报 connected
 
 import (
 	"encoding/json"
@@ -13,6 +15,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newRelayTestApp(t *testing.T, handler http.HandlerFunc) *App {
@@ -34,77 +37,176 @@ func sendJSON(w http.ResponseWriter, v any) {
 
 // TestFetchRelayCandidatesUsesGlobalPoolWithExcludeRoom 不带 roomCode（带了就只回本房成员），
 // 整房排除靠 excludeRoom=<本房>。
-func TestFetchRelayCandidatesUsesGlobalPoolWithExcludeRoom(t *testing.T) {
-	var gotRoute, gotRoomCode, gotExclude string
-	a := newRelayTestApp(t, func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		gotRoute, gotRoomCode, gotExclude = q.Get("route"), q.Get("roomCode"), q.Get("excludeRoom")
-		sendJSON(w, map[string]any{"success": true, "data": map[string]any{"candidates": []any{
-			map[string]any{"clientId": "c1", "natType": "full-cone", "mappedIp": "203.0.113.9", "mappedPort": 41000},
-		}}})
-	})
-	e := a.engine
-	e.mu.Lock()
-	e.code = "HOST01"
-	e.mu.Unlock()
+// ---- 房内候选挑选与批次机器（对齐 CM:10577-10793；跨房全局池已退役）----
 
-	cands, err := e.fetchRelayCandidates(e.code)
-	if err != nil {
-		t.Fatal(err)
+func relayPeerForTest(id string, ip string, port int, nat natClass, caps []string, mux bool, rto int) *hostPeer {
+	sock, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	rc := newRudp(sock, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1})
+	if mux {
+		rc.enableMux()
 	}
-	if len(cands) != 1 || cands[0].ClientID != "c1" {
-		t.Fatalf("candidates = %+v", cands)
-	}
-	if gotRoute != "/relay/candidates" {
-		t.Fatalf("route = %q", gotRoute)
-	}
-	if gotRoomCode != "" {
-		t.Fatalf("must not scope the pool to our own room, got roomCode=%q", gotRoomCode)
-	}
-	if gotExclude != "HOST01" {
-		t.Fatalf("excludeRoom = %q, want HOST01", gotExclude)
-	}
+	rc.rtoMs = rto
+	return &hostPeer{id: id, mapped: &stunMappedAddr{IP: ip, Port: port}, natClass: nat, caps: caps, rudp: rc}
 }
 
-func relayCand(id, nat, ip string, port int) relayCandidate {
-	return relayCandidate{ClientID: id, NatType: nat, MappedIP: ip, MappedPort: port}
-}
-
-// TestPickRelayCandidateSkipsOwnRoomAndBalancesLoad 自家房客/发起人/自己的房主身份/
-// 对称与 unknown NAT 一律不投；剩下的按已派发次数升序取最闲的。
-func TestPickRelayCandidateSkipsOwnRoomAndBalancesLoad(t *testing.T) {
+// TestPickRelayCandidatesEligibility 六道硬门槛逐条断言（CM:10581-10611）：
+// 无映射/无传输/对称或未知 NAT/缺 relay 能力/缺 relayMuxV1 或传输未 mux 化/发起人自己/60 秒黑名单。
+func TestPickRelayCandidatesEligibility(t *testing.T) {
 	a := NewApp()
 	e := a.engine
+	ok := func(id string) *hostPeer {
+		return relayPeerForTest(id, "203.0.113.10", 40010, natCone,
+			[]string{capNameRelay, relayMuxCapability}, true, 300)
+	}
+	peers := map[string]*hostPeer{
+		"good":        ok("good"),
+		"noMapped":    func() *hostPeer { q := ok("noMapped"); q.mapped = nil; return q }(),
+		"noTransport": func() *hostPeer { q := ok("noTransport"); q.rudp = nil; return q }(),
+		"symmetric": relayPeerForTest("symmetric", "203.0.113.11", 40011, natHardSym,
+			[]string{capNameRelay, relayMuxCapability}, true, 100),
+		"unknownNat": relayPeerForTest("unknownNat", "203.0.113.12", 40012, natUnknown,
+			[]string{capNameRelay, relayMuxCapability}, true, 100),
+		"legacyRelay": relayPeerForTest("legacyRelay", "203.0.113.13", 40013, natCone,
+			[]string{relayMuxCapability}, true, 100),
+		"noMuxCap": relayPeerForTest("noMuxCap", "203.0.113.14", 40014, natCone,
+			[]string{capNameRelay}, true, 100),
+		"muxOff": relayPeerForTest("muxOff", "203.0.113.15", 40015, natCone,
+			[]string{capNameRelay, relayMuxCapability}, false, 100),
+		"requester": ok("requester"),
+	}
 	e.mu.Lock()
 	e.code = "HOST01"
-	e.clientID = "self-client"
-	e.hPeers = map[string]*hostPeer{"mate-1": {}, "mate-2": {}}
+	e.hPeers = peers
 	e.mu.Unlock()
 
-	cands := []relayCandidate{
-		relayCand("mate-1", "full-cone", "203.0.113.1", 40001), // 同房成员：候选池要整房排除
-		relayCand("requester", "full-cone", "203.0.113.2", 40002),
-		relayCand("self-client", "full-cone", "203.0.113.3", 40003),
-		relayCand("host-HOST01", "full-cone", "203.0.113.4", 40004), // 本房房主身份
-		relayCand("sym-guy", "symmetric", "203.0.113.5", 40005),
-		relayCand("no-addr", "full-cone", "", 0),
-		relayCand("busy", "full-cone", "203.0.113.6", 40006),
-		relayCand("idle", "cone", "203.0.113.7", 40007),
+	got := e.pickRelayCandidates("requester")
+	if len(got) != 1 || got[0].id != "good" {
+		var ids []string
+		for _, g := range got {
+			ids = append(ids, g.id)
+		}
+		t.Fatalf("候选集应为 [good]，实际 %v", ids)
 	}
 
-	if got := e.pickRelayCandidate(cands, "requester", "self-client"); got == nil || got.ClientID != "busy" {
-		t.Fatalf("first pick = %+v, want busy（服务端洗牌后的首位，载荷计数相同）", got)
+	// 60 秒黑名单（CM:210/:417-435）：被拉黑的成员不得再进候选
+	e.relayMarkFailed("good")
+	if got := e.pickRelayCandidates("requester"); len(got) != 0 {
+		t.Fatal("刚被拉黑的候选不得再次入选")
 	}
-	// 第二次派发：busy 已经背了一次，必须让给更闲的 idle，而不是继续取第一个
-	if got := e.pickRelayCandidate(cands, "requester", "self-client"); got == nil || got.ClientID != "idle" {
-		t.Fatalf("second pick = %+v, want idle（按派发次数挑最闲）", got)
+	// 全空时按 CM:10621-10623 清黑名单（让下一次能重新面对全量候选）
+	e.relayClearFailures()
+	if got := e.pickRelayCandidates("requester"); len(got) != 1 {
+		t.Fatalf("清账后应重新可选，实际 %d", len(got))
 	}
+}
 
-	// 全被排除时返回 nil，让调用方 declined
-	onlyMine := []relayCandidate{relayCand("mate-2", "full-cone", "203.0.113.8", 40008)}
-	if got := e.pickRelayCandidate(onlyMine, "requester", "self-client"); got != nil {
-		t.Fatalf("own-room-only pool must yield nil, got %+v", got)
+// TestPickRelayCandidatesOrderAndCap 先按承载量升序、再看 RTO（CM:10639-10659），
+// 一批最多 3 个（CM:10661-10663）。
+func TestPickRelayCandidatesOrderAndCap(t *testing.T) {
+	a := NewApp()
+	e := a.engine
+	caps := []string{capNameRelay, relayMuxCapability}
+	e.mu.Lock()
+	e.code = "HOST02"
+	e.hPeers = map[string]*hostPeer{
+		"p1": relayPeerForTest("p1", "203.0.113.21", 40021, natCone, caps, true, 500),
+		"p2": relayPeerForTest("p2", "203.0.113.22", 40022, natCone, caps, true, 100),
+		"p3": relayPeerForTest("p3", "203.0.113.23", 40023, natCone, caps, true, 300),
+		"p4": relayPeerForTest("p4", "203.0.113.24", 40024, natCone, caps, true, 200),
 	}
+	e.mu.Unlock()
+
+	got := e.pickRelayCandidates("someone")
+	if len(got) != maxRelayCandidates {
+		t.Fatalf("一批应截到 3 个，实际 %d", len(got))
+	}
+	want := []string{"p2", "p4", "p3"} // RTO 升序（承载都是 0）
+	for i, id := range want {
+		if got[i].id != id {
+			t.Fatalf("第 %d 位应为 %s（RTO 升序），实际 %s", i+1, id, got[i].id)
+		}
+	}
+}
+
+// TestRelayBatchTimeoutBlacklistsAndRecurses 一批 8 秒没人成桥：整批拉黑（CM:10779-10786）
+// 并递归下一批（CM:10789）；下一批已无候选时按 CM:10627 走"无候选"收口。
+func TestRelayBatchTimeoutBlacklistsAndRecurses(t *testing.T) {
+	oldTimeout := relayBatchTimeout
+	relayBatchTimeout = 60 * time.Millisecond
+	defer func() { relayBatchTimeout = oldTimeout }()
+
+	a := NewApp()
+	e := a.engine
+	caps := []string{capNameRelay, relayMuxCapability}
+	// 给 4 个合格候选：一批上限 3，所以第一批用掉 3 个、超时拉黑后，
+	// 递归的第二批必须只剩第 4 个可选——这样才能真验证"拉黑整批 + 递归下一批"。
+	e.mu.Lock()
+	e.code = "HOST03"
+	e.hPeers = map[string]*hostPeer{
+		"s1": relayPeerForTest("s1", "203.0.113.31", 40031, natCone, caps, true, 100),
+		"s2": relayPeerForTest("s2", "203.0.113.32", 40032, natCone, caps, true, 110),
+		"s3": relayPeerForTest("s3", "203.0.113.33", 40033, natCone, caps, true, 120),
+		"s4": relayPeerForTest("s4", "203.0.113.34", 40034, natCone, caps, true, 130),
+	}
+	e.mu.Unlock()
+
+	// 批超时守卫要求"还是开局那个会话"（CM:10771 的 currentRoom.get() == state），
+	// 所以这里必须真给引擎绑一个会话，不能塞 nil。
+	sess := newSession(a, "HOST03", "tok", true)
+	e.mu.Lock()
+	e.sess = sess
+	e.mu.Unlock()
+
+	batches := 0
+	e.relayBeginManualRelay()
+	e.relayDispatchOnce(sess, "target", "203.0.113.99", 40099, func(batch []*hostPeer, index, size int) {
+		batches++
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for batches < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if batches < 2 {
+		t.Fatalf("批次超时后必须递归下一批，实际只派发 %d 次", batches)
+	}
+	for _, id := range []string{"s1", "s2", "s3"} {
+		if !e.relayPeerFailed(id) {
+			t.Fatalf("超时的整批候选 %s 要写进 60 秒黑名单（CM:10777-10779）", id)
+		}
+	}
+	if e.relayPeerFailed("s4") {
+		t.Fatal("第二批的候选不该被上一批的超时牵连")
+	}
+	if got := e.relayCurrentPeer(); got != "s4" {
+		t.Fatalf("第二批应把在池中继者记成 s4，实际 %q", got)
+	}
+	e.relayEndManualRelay()
+}
+
+// TestRelayOverallDeadlineStopsDispatch 90 秒总闸到期：不再派发，直接走 failed_timeout（CM:10511-10517）。
+func TestRelayOverallDeadlineStopsDispatch(t *testing.T) {
+	a := NewApp()
+	e := a.engine
+	caps := []string{capNameRelay, relayMuxCapability}
+	e.mu.Lock()
+	e.code = "HOST04"
+	e.hPeers = map[string]*hostPeer{
+		"x": relayPeerForTest("x", "203.0.113.41", 40041, natCone, caps, true, 100),
+	}
+	e.mu.Unlock()
+
+	e.relayBeginManualRelay()
+	e.mu.Lock()
+	m := relayCandidatesOf(e)
+	m.deadlineMs = time.Now().UnixMilli() - 1 // 拨到已过期
+	e.mu.Unlock()
+
+	sent := 0
+	e.relayDispatchOnce(nil, "target", "203.0.113.99", 40099, func(batch []*hostPeer, index, size int) { sent++ })
+	if sent != 0 {
+		t.Fatal("总闸到期后不得再派发任何候选")
+	}
+	e.relayEndManualRelay()
 }
 
 // TestHostOnRelayAcceptForwardsConnected 候选者回执 relay_accept 后，房主要把

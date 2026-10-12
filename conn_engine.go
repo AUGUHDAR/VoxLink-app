@@ -422,6 +422,7 @@ func (e *connEngine) teardown() {
 	e.hTcpPairs = nil
 	e.tcpPunchers = nil
 	e.hRelayDispatched = nil
+	resetRelayCandidates(e) // 退房清账：批次计时器/current/90s 总闸一起归零（CM:13486 clearRelayTracking）
 	e.mu.Unlock()
 
 	// 定时器/热备在锁外收尾（goroutine 只靠这些闭包停，漏关就是常驻泄漏）
