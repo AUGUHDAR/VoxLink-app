@@ -199,6 +199,12 @@ func (e *connEngine) startStdTurnKeepalive(s *stdTurnSession) {
 
 // teardownTurn 全量拆除 TURN（失败/断线/会话结束共用）。
 func (e *connEngine) teardownTurn(notifyFail bool) {
+	// CM:12592-12633：TURN 塌掉但热备活着 → 热备转正接管（activeUdpTransports 换键、
+	// setUsingRelay(true)、重起桥），并且这一轮**不能**再走失败上报。
+	promoted := e.promoteHotstandbyOnTurnDeath()
+	if promoted {
+		notifyFail = false
+	}
 	e.mu.Lock()
 	// F7 会话纪元：每次拆 +1。异步链（cred/allocate/bind）出发时抓取纪元、写回时比对，
 	// 单靠 turnInFlight 判不出来——35s 总预算复位过一轮再重新置 true，晚到的旧会话照样写得进。
@@ -218,6 +224,20 @@ func (e *connEngine) teardownTurn(notifyFail bool) {
 	e.mu.Unlock()
 
 	e.stopTurnKeepalive()
+	// CM:12531-12536：拆 TURN 时后台监视器、稳定观察窗、热备 keepalive 三路定时器一起撤；
+	// 没转正的热备在这一并关掉（转正的那条已交给 rRudp，不能再关）。
+	e.stopTurnBgMonitorInternal()
+	e.stopTurnSwitchWatch()
+	e.stopHotstandbyKeepalive()
+	if !promoted {
+		e.mu.Lock()
+		sb := e.turnHotstandby
+		e.turnHotstandby = nil
+		e.mu.Unlock()
+		if sb != nil {
+			_ = sb.Close()
+		}
+	}
 	if s != nil {
 		s.unbind()
 	}
@@ -232,7 +252,11 @@ func (e *connEngine) teardownTurn(notifyFail bool) {
 	}
 	if notifyFail && !isHost {
 		// 统一失败口：自动模式下不弹失败屏，交编排器换道/复活打洞（模组 teardownTurn 的 failKey 语义）。
-		e.relayFailOrAuto(keyAutoTurnFailed, "TURN 中继建立失败")
+		if e.relayFailForTest != nil {
+			e.relayFailForTest(keyAutoTurnFailed)
+		} else {
+			e.relayFailOrAuto(keyAutoTurnFailed, "TURN 中继建立失败")
+		}
 	}
 }
 
@@ -591,6 +615,8 @@ func (e *connEngine) hostOnTurnAlloc(from string, data map[string]any) {
 		// 原始字节灌进 MC 流，走 TURN 必进不去服。两边都必须不开。
 		transport.Start()
 		startHostLazyBridge(transport, mcPort, e.app.netLog)
+		// CM:11918 / CM:12052：房主侧 TURN 承载起来后开后台升直连监视器
+		e.startTurnBgMonitor()
 
 		_ = e.sendSignal("turn_ready", map[string]any{"clientId": e.hostClientID()}, from)
 		// 投递保险：4s 后补发一次（会话仍在且对端未换）
@@ -681,6 +707,8 @@ func (e *connEngine) hostOnStdTurnAlloc(from string, data map[string]any) {
 		// TURN 承载不开 mux（同上 CM:15711 只在直连工厂里 enableMux）
 		transport.Start()
 		startHostLazyBridge(transport, mcPort, e.app.netLog)
+		// CM:11918 / CM:12052：房主侧 TURN 承载起来后开后台升直连监视器
+		e.startTurnBgMonitor()
 
 		relay := session.relayAddr.Load()
 		ready := map[string]any{
@@ -807,6 +835,8 @@ func (e *connEngine) guestOnStdTurnReady(data map[string]any) {
 
 // turnGuestBridgeUp guest 侧桥接：本地监听桥 + 成功上报。
 func (e *connEngine) turnGuestBridgeUp(transport *rudpConn) {
+	// CM:12093 / CM:12166：房客侧 TURN 承载起来后开后台升直连监视器
+	e.startTurnBgMonitor()
 	// 载具热切优先（模组 startUdpPunchBridge 第一分支）：旧道被 25s 验证窗判死时 gP2PDone 仍是 true，
 	// 若先看下面那道"已完成就关新传输"的守卫，新道会被自己关掉——换道必须抢在它前面。
 	if e.tryCarrierSwap(transport) {

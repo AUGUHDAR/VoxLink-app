@@ -183,6 +183,17 @@ func (e *connEngine) guestOnRelayNotify(from string, data map[string]any) {
 	relayIP := sigStr(data, "relayIp")
 	relayPort := sigInt(data, "relayPort")
 	if relayIP != "" && relayPort > 0 {
+		// CM:11150-11161 的 TURN 门：TURN 正在承载且还没有热备时，这条 notify 只用来建**热备**，
+		// 绝不建第二条本地桥（双桥冲突正是模组注释点名要防的）。
+		e.mu.Lock()
+		turnLive := e.turnTransport != nil && e.turnTransport.IsConnected()
+		haveStandby := e.turnHotstandby != nil
+		e.mu.Unlock()
+		if turnLive && !haveStandby {
+			e.app.netLog("info", "relay_notify 到达且 TURN 承载中：建玩家中继热备，不建第二条桥")
+			e.establishHotstandby(relayIP, relayPort)
+			return
+		}
 		e.app.netLog("info", "收到 relay_notify，开始打洞")
 		go e.relayPunchFlow(attempt, relayIP, relayPort)
 		return

@@ -200,6 +200,21 @@ type connEngine struct {
 	turnReadyApplied  bool
 	turnPeerID        string
 
+	// TURN 建立后的后台升直连 + 玩家中继热备（CM:235-270 的字段组，逐条对位）
+	turnBgMonitorStop   func()       // CM:240 turnBgMonitorTask
+	turnBgDeadlineMs    int64        // CM:241 turnBgDeadlineMs（10 分钟窗口）
+	turnSwitchWatchStop func()       // CM:243 turnSwitchWatchTask
+	turnSwitchStreak    int          // CM:244 turnSwitchStreak
+	turnBgPunchWon      bool         // CM:245 turnBgPunchWon（CAS 去重）
+	turnP2pGivenUp      bool         // CM:247 turnP2pGivenUp
+	turnSwitchedToP2p   bool         // CM:249 turnSwitchedToP2p
+	turnBgTicks         int          // CM:253 turnBgTicks
+	turnHotstandby      *rudpConn    // CM:258 turnHotstandbyTransport
+	hotstandbyKbStop    func()       // CM:270 hotstandbyKeepaliveTask
+	relayFailForTest    func(string) // 测试钩子：非 nil 时替代 relayFailOrAuto 观察失败上报
+	turnBgAttempts      int          // 观测量：后台直连 puncher 被驱动次数（用例判守卫用）
+	turnStandbyAttempts int          // 观测量：热备建立被驱动次数
+
 	// host 侧状态
 	hPeers map[string]*hostPeer
 	// 本会话已向某候选派发过几次 relay_setup（挑最闲的候选用）
@@ -371,6 +386,22 @@ func (e *connEngine) teardown() {
 	e.turnKeepaliveStop = nil
 	e.turnReadyApplied = false
 	e.turnPeerID = ""
+	// 后台升直连/热备的字段复位（CM:12718-12721、13046）：漏复位会让下一会话的
+	// 后台升级 CAS 恒失败，直连升级永久失效（模组注释点名为 P1-4）。
+	bgStop := e.turnBgMonitorStop
+	watchStop := e.turnSwitchWatchStop
+	hbStop := e.hotstandbyKbStop
+	hotstandby := e.turnHotstandby
+	e.turnBgMonitorStop = nil
+	e.turnSwitchWatchStop = nil
+	e.hotstandbyKbStop = nil
+	e.turnHotstandby = nil
+	e.turnBgDeadlineMs = 0
+	e.turnBgTicks = 0
+	e.turnSwitchStreak = 0
+	e.turnBgPunchWon = false
+	e.turnP2pGivenUp = false
+	e.turnSwitchedToP2p = false
 	e.rInFlight = false
 	e.rDone = false
 	e.rAttempt++ // 作废上一轮中继的在途打洞/看门狗，防止退房后晚到的隧道写回新会话
@@ -387,6 +418,20 @@ func (e *connEngine) teardown() {
 	e.tcpPunchers = nil
 	e.hRelayDispatched = nil
 	e.mu.Unlock()
+
+	// 定时器/热备在锁外收尾（goroutine 只靠这些闭包停，漏关就是常驻泄漏）
+	if bgStop != nil {
+		bgStop()
+	}
+	if watchStop != nil {
+		watchStop()
+	}
+	if hbStop != nil {
+		hbStop()
+	}
+	if hotstandby != nil {
+		_ = hotstandby.Close()
+	}
 
 	// 尽力通知对端（模组离开时也发 disconnect）
 	if sendBye {
@@ -501,6 +546,8 @@ var engineSignals = map[string]bool{
 	"tcp_punch_info":      true,
 	"tcp_punch_go":        true,
 	"tcp_simopen_request": true, // Wave2 房客请房主也发起 SimOpen（CM:7142）
+	"turn_bg_punch":       true, // RM:1950 → CM:12371 后台升直连
+	"turn_stby":           true, // RM:1953 → CM:12497 热备建立提示
 }
 
 // onSignal 把一条信令交给引擎（只处理引擎关心的类型）。
@@ -596,6 +643,16 @@ func (e *connEngine) onSignal(typ, from string, data map[string]any) {
 	case "tcp_simopen_request":
 		if e.roleIsHost() {
 			e.hostOnTcpSimopenRequest(from, data)
+		}
+	case "turn_bg_punch":
+		// CM:12371：房主侧纯信号驱动（from 不参与判定，打的就是信令里带来的地址）
+		if e.roleIsHost() {
+			e.handleTurnBgPunch(data)
+		}
+	case "turn_stby":
+		// CM:12497：房主侧零状态变更，只提示
+		if e.roleIsHost() {
+			e.handleTurnStby()
 		}
 	}
 }
