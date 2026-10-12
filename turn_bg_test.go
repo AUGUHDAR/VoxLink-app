@@ -33,7 +33,7 @@ func livePair(t *testing.T) (*rudpConn, *net.UDPConn, *net.UDPAddr) {
 		t.Fatal(err)
 	}
 	sba := sb.LocalAddr().(*net.UDPAddr)
-	tr := newRudp(sa, &net.UDPAddr{IP: sba.IP, Port: sba.Port})
+	tr := newRudp(sa, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1).To4(), Port: sba.Port})
 	t.Cleanup(func() {
 		tr.Close()
 		_ = sb.Close()

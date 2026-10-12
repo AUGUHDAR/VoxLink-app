@@ -214,6 +214,9 @@ type connEngine struct {
 	relayFailForTest    func(string) // 测试钩子：非 nil 时替代 relayFailOrAuto 观察失败上报
 	turnBgAttempts      int          // 观测量：后台直连 puncher 被驱动次数（用例判守卫用）
 	turnStandbyAttempts int          // 观测量：热备建立被驱动次数
+	// ICE 重启限次与冷却（CM:293 MAX_ATTEMPTS=3、CM:295 COOLDOWN=5000ms、CM:297/299 两个计数）
+	iceRestartAttempts int   // CM:297 iceRestartAttempts
+	lastIceRestartMs   int64 // CM:299 lastIceRestartTimeMs
 
 	// host 侧状态
 	hPeers map[string]*hostPeer
@@ -402,6 +405,8 @@ func (e *connEngine) teardown() {
 	e.turnBgPunchWon = false
 	e.turnP2pGivenUp = false
 	e.turnSwitchedToP2p = false
+	e.iceRestartAttempts = 0 // CM:14181 resetIceRestartState（RoomManager.java:886 退房路径调用）
+	e.lastIceRestartMs = 0   // CM:14183
 	e.rInFlight = false
 	e.rDone = false
 	e.rAttempt++ // 作废上一轮中继的在途打洞/看门狗，防止退房后晚到的隧道写回新会话
@@ -1686,15 +1691,51 @@ func (e *connEngine) guestTeardownP2P() {
 }
 
 // guestIceRestart 心跳闭环：链路死亡 → 通知对端 + 以最近一次 offer 重新驱动打洞。
+// iceRestartCooldown / iceRestartMaxAttempts / iceRestartNowMs 对位 CM:295(5000ms)、
+// CM:293(3 次)；抽成 var 是用例拨表用，值即模组常量。
+var (
+	iceRestartCooldown    = 5 * time.Second
+	iceRestartMaxAttempts = 3
+	iceRestartNowMs       = func() int64 { return time.Now().UnixMilli() }
+)
+
+// guestIceRestart 对位 CM:14254-14295 performIceRestart：
+// 先静默拆 TURN，再判 5s 冷却，再判 3 次上限，三道守卫都在"发信令之前"——
+// 被冷却/上限挡掉时一条 ice_restart 都不该发出去（模组那两条分支只记日志并 return）。
 func (e *connEngine) guestIceRestart() {
-	// 上线类型是 ice_restart（requestIceRestart 为模组方法名，发错会被服务端拒收）
-	_ = e.sendSignal("ice_restart", map[string]any{}, "host")
 	e.mu.Lock()
+	turnLive := e.turnSession != nil || e.stdTurnSession != nil
+	e.mu.Unlock()
+	if turnLive {
+		// CM:14256-14259：ICE 重启将停所有传输，TURN 会话先静默拆净，
+		// 否则 stdTurnSession 残留会锁死自动中继导演（G2 恒判"中继在途"）。
+		e.teardownTurnQuietly()
+	}
+
+	e.mu.Lock()
+	now := iceRestartNowMs()
+	if now-e.lastIceRestartMs < iceRestartCooldown.Milliseconds() { // CM:14263-14267
+		e.mu.Unlock()
+		e.app.netLog("info", "ice_restart_cooldown_ignored")
+		return
+	}
+	e.iceRestartAttempts++ // CM:14271
+	if e.iceRestartAttempts > iceRestartMaxAttempts {
+		e.mu.Unlock()
+		e.app.netLog("warn", "ice_restart_max_attempts_reached")
+		return
+	}
+	e.lastIceRestartMs = now
+	attempt := e.iceRestartAttempts
 	e.punchRecvEver = false
 	e.predictionOffCount = 0
 	e.retryRound = 0
 	offer := e.gLastOffer
 	e.mu.Unlock()
+	e.app.netLog("info", fmt.Sprintf("ice_restart_trigger %d/%d", attempt, iceRestartMaxAttempts)) // CM:14277-14279
+
+	// 上线类型是 ice_restart（requestIceRestart 为模组方法名，发错会被服务端拒收）
+	_ = e.sendSignal("ice_restart", map[string]any{}, "host")
 	if offer == nil {
 		return
 	}

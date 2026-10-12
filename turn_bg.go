@@ -488,7 +488,7 @@ func (e *connEngine) startHotstandbyKeepalive(tr *rudpConn) {
 			case <-stop:
 				return
 			case <-t.C:
-				tr.sendFrame(rudpFrame{Type: rudpTypeKeepalive}) // CM:12487 sendKeepaliveFrame 对位
+				tr.sendKeepaliveFrame() // CM:12487 → RUDP:443-446：走带 running&&connected 守卫的入口
 			}
 		}
 	}()

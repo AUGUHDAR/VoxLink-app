@@ -5,11 +5,13 @@ package main
 //	帧头 11B：56 4C + type(u8) + seq(u32 BE) + ack(u32 BE)
 //	DATA/FEC_XOR 附加：payloadLen(u16 BE)；DATA 头 13B；FEC 头 13B + [13]=count
 //	type: 1 PUNCH(收到回 56 4C 02 00 00) 2 PUNCH_ACK 3 DATA 4 ACK(纯11B)
-//	      7 DISCONNECT 8 KEEPALIVE(11B，收到必回) 9 FEC_XOR 10 RESTART(忽略) 11 VOICE(忽略)
+//	      7 DISCONNECT 8 KEEPALIVE(11B，收到必回) 9 FEC_XOR
+//	      10 RESTART(收到→ICE 重启 RUDP:718-722；本端判死时主动发 RUDP:517-528) 11 VOICE(忽略)
 //
 // 语义：累计 ACK（ack=nextExpectedSeq）、RTO RFC6298 夹 [100,800]ms、
 // 重传退避 rto+min(retries,3)*250、乱序窗口 128、<512B 小包首发 50ms 后复制重发一次、
-// KEEPALIVE 1s、静默>8s 降级、pending 且静默>24s 判死、>60s 硬超时。
+// KEEPALIVE 1s、静默>8s 降级、pending 且静默>24s 判死、>60s 硬超时、
+// 心跳连续 5 拍零入站判"单向死"（发 RESTART → 触发 ICE 重启回调 → 关闭，RUDP:51、1136-1157）。
 // FEC：发送按组 4 包 + XOR（ReliableUdpTransport.java:820-842 字节布局），
 // 接收端收齐 3+XOR 恢复缺失包。连接建立第一件事：互发 KEEPALIVE（无 SYN 握手）。
 //
@@ -68,6 +70,12 @@ const (
 	rudpSilenceDead     = 24 * time.Second
 	rudpSilenceHard     = 60 * time.Second
 	rudpStuckWriteLimit = 30 * time.Second
+
+	// 单向死判据：心跳连续 N 拍零入站即判死（模组 HEARTBEAT_FAIL_LIMIT=5，RUDP:51；
+	// 拍距 = KEEPALIVE_INTERVAL_S 1s，RUDP:48，排拍见 RUDP:430）。每拍只看 lastRecv 有没有
+	// 前移（RUDP:1143），前移即整体复位，所以这条走的是"发得出去、收不回来"的快速通道，
+	// 比上面 24s/60s 两条静默判定先收敛。
+	rudpHeartbeatFailLimit = 5
 
 	// 死对端熔断：连续重传 20 轮、期间对端零收包且总静默超 23s 才清窗。
 	// MIN_SILENCE 贴着上面的 24s 强制关闭取值——对端 keepalive 间隔仅 1s，
@@ -321,8 +329,18 @@ type rudpConn struct {
 	doneCh    chan struct{}
 	closeMsg  atomic.Pointer[string]
 	onClosed  func(reason string)
-	onRestart func() // 收到对端 RESTART 帧时触发（ICE 重启）
-	logf      func(level, msg string)
+	onRestart func() // ICE 重启回调的历史入口名（下面那个槽的回落位，见 setOnRestart 注释）
+	// ICE 重启回调（模组只有一个槽 onIceRestartRequested，RUDP:120；收对端 RESTART 与
+	// 本端判死都走它）。模组由 ConnectionManager.java:15689 挂 CM.triggerIceRestart(14211)。
+	onIceRestartRequested func()
+	iceRestartTriggered   atomic.Bool // 一次会话只触发一次 ICE 重启（RUDP:102、505）
+	logf                  func(level, msg string)
+
+	// 单向死检测（模组 RUDP:113-116，只在心跳拍那一条线程上访问）：
+	// streak 例外——认证降级要跨收包线程复位它（RUDP:391），故用原子。
+	lastHeartbeatMs     int64 // 上一拍的锚点：lastRecv 超过它即算这一拍收到过包
+	heartbeatFailStreak atomic.Int32
+	heartbeatEverRx     bool // 从未收进过字节的不算单向死（RUDP:1146 的闸门）
 }
 
 // setLogf 挂上网络日志（模组 [ReliableUdp] 那批 WARN/INFO 是本模块唯一的现场证据来源：
@@ -370,14 +388,69 @@ func newRudp(conn *net.UDPConn, remote *net.UDPAddr) *rudpConn {
 		c.remote.Store(remote)
 	}
 	c.lastRecv.Store(time.Now().UnixMilli())
+	// 判死锚点与 lastRecvTime 同时起步（模组字段初值 RUDP:96、114）：
+	// 第一拍之前 lastRecv 必然 > lastHeartbeatMs，不会凭空累计失败轮次
+	c.lastHeartbeatMs = time.Now().UnixMilli()
 	return c
 }
 
 // setOnClosed 注册关闭回调（对端断开/判死/重传超限时触发一次）。
 func (c *rudpConn) setOnClosed(fn func(reason string)) { c.onClosed = fn }
 
-// setOnRestart 注册对端 RESTART 帧回调（ICE 重启）。
+// setOnRestart 注册 ICE 重启回调（历史入口名：以前只挂在对端 RESTART 帧上，现在与本端判死共用，
+// 见 setOnIceRestartRequested —— 模组侧只有一个槽 RUDP:120）。
 func (c *rudpConn) setOnRestart(fn func()) { c.onRestart = fn }
+
+// setOnIceRestartRequested 注册 ICE 重启回调（模组 setOnIceRestartRequested:448-450）。
+// 模组只有这一个回调槽 onIceRestartRequested（RUDP:120），收对端 RESTART（:721）与三个判死点
+// （心跳 :1150、60s :1176、24s :1182）都走它；接线位置 ConnectionManager.java:15689
+// `transport.setOnIceRestartRequested(this::triggerIceRestart)`（CM.triggerIceRestart 见 :14211）。
+// 本端历史上把这个槽叫 onRestart/setOnRestart（上面那个），triggerIceRestart 优先取本 setter、
+// 没挂时回落到 onRestart，既有三处接线（conn_engine 的 guestIceRestart 与 hostRestartPeer、
+// turn_flow 的 teardownTurn）不改也生效。
+func (c *rudpConn) setOnIceRestartRequested(fn func()) { c.onIceRestartRequested = fn }
+
+// requestIceRestart 引擎侧主动请求重启（模组 requestIceRestart:497-499，就是 triggerIceRestart 的公开外壳）。
+func (c *rudpConn) requestIceRestart() { c.triggerIceRestart() }
+
+// triggerIceRestart 通知引擎发起 ICE 重启（模组 triggerIceRestart:501-515）：
+// 已关闭不触发（:502-504）、iceRestartTriggered 保证一条会话只触发一次（:505）、
+// 回调抛异常不回灌传输（:510-512 的 try/catch → Go 的 recover）。
+// 闸门与 CAS 一定在本线程做完再派发回调：判死路径派发完就 close（RUDP:1150-1151），
+// 若把 closed 检查也丢进 goroutine，回调会被自己紧随的关闭吞掉、永不落地。
+// 模组在调用线程上同步 run()；本端回调是引擎拆链路（hostRestartPeer/teardownTurn，会阻塞），
+// 同步跑会拖死心跳拍与收包循环，故派发出去——语义次序（先判闸后执行）不变。
+func (c *rudpConn) triggerIceRestart() {
+	if c.closed.Load() { // :502
+		return
+	}
+	if !c.iceRestartTriggered.CompareAndSwap(false, true) { // :505
+		return
+	}
+	fn := c.onIceRestartRequested
+	if fn == nil {
+		fn = c.onRestart // 兼容只挂 setOnRestart 的历史接线
+	}
+	if fn == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.rlog("warn", "ICE Restart callback exception: %v", r) // :511
+			}
+		}()
+		fn()
+	}()
+}
+
+// sendRestart 主动发 RESTART 帧（模组 sendRestart:517-528）：11B 裸帧、type=10（:38）、
+// seq=0、ack=0（:522-523），认证与路径包封走 sendFrame 统一出口（对应 :524-525 的
+// finalizeFrame + sendOnPrimary）。调用点必须排在 close 之前——sendFrame 见 closed 即静默不发，
+// 而模组 close() 也在 sendRestart 之后（RUDP:1149-1151）。
+func (c *rudpConn) sendRestart() {
+	c.sendFrame(rudpFrame{Type: rudpTypeRestart})
+}
 
 // setCodec 设置路径包封编解码器（须在 Start 前调用；nil=直连裸跑）。
 func (c *rudpConn) setCodec(pc rudpPathCodec) { c.codec = pc }
@@ -416,7 +489,9 @@ func (c *rudpConn) authDrop() {
 		c.authKey = nil
 		c.rlog("warn", "peer sends unauthenticated frames x%d, TURN interop downgrade to plaintext", c.consecutiveAuthDrops)
 		// 降级与静默判死同拍竞速会差毫秒级把刚建立的明文链路判死：重置判死锚点，
-		// 给明文通道一整个窗口（模组 handleAuthDrop 同一处改动）
+		// 给明文通道一整个窗口（模组 handleAuthDrop 同一处改动）。
+		// RUDP:391-392 重置的是两样：心跳失败轮次(:391) + lastRecvTime(:392)
+		c.heartbeatFailStreak.Store(0)
 		c.lastRecv.Store(time.Now().UnixMilli())
 	}
 }
@@ -428,7 +503,8 @@ func (c *rudpConn) authOk() {
 	c.authMu.Unlock()
 }
 
-// Start 启动收发循环；连接建立第一件事：发一个 KEEPALIVE（模组 start() 即发）。
+// Start 启动收发循环；连接建立第一件事：发一个 KEEPALIVE（模组 start() 即发，RUDP:415-421）。
+// 1s 定时器挂的是 heartbeatTick 而非裸发 keepalive（RUDP:430）：保活与单向死判定共用这一拍。
 func (c *rudpConn) Start() {
 	c.started.Store(true)
 	c.sendFrame(rudpFrame{Type: rudpTypeKeepalive})
@@ -554,6 +630,10 @@ func (c *rudpConn) closeSubstream(ch int) {
 	c.sendDataPacket(seq, payload, false)
 }
 
+// rudpReasonOneWayDead 心跳判死的关闭原因（模组 heartbeatTick 判死点 RUDP:1146-1152）。
+// 前缀"单向死"必须同时出现在 rudpReasonIsDead 的名单里，否则 RUDP:1148 那次 onLinkDead 不上报。
+const rudpReasonOneWayDead = "单向死: 心跳连续 5 拍零入站"
+
 func (c *rudpConn) closeWith(reason string) {
 	c.closeMsg.CompareAndSwap(nil, &reason)
 	// 判死四类（对端断开不算）交出去登记日志样本：模组是在 ReliableUdpTransport.java
@@ -567,9 +647,13 @@ func (c *rudpConn) closeWith(reason string) {
 }
 
 // rudpReasonIsDead 区分"判死"与"正常关闭/对端主动断开"：只有前者要触发立即上传。
+// 名单逐项对应模组的四个 onLinkDead 判定点：单向死(RUDP:1148)、静默超60s(:1174)、
+// 静默超24s(:1180)、重传超限(:1206)；"传输停滞"对应写侧 30s 无进展（模组在 sendBytes
+// :1306-1307 只是抛 IOException，本端按判死形态收敛并上报）。
 func rudpReasonIsDead(reason string) bool {
 	switch {
-	case strings.HasPrefix(reason, "传输停滞"),
+	case strings.HasPrefix(reason, "单向死"),
+		strings.HasPrefix(reason, "传输停滞"),
 		strings.HasPrefix(reason, "静默超60s"),
 		strings.HasPrefix(reason, "静默超24s"),
 		strings.HasPrefix(reason, "seq "):
@@ -761,10 +845,12 @@ func (c *rudpConn) processFrame(f rudpFrame) {
 		c.handleFecXor(f)
 	case rudpTypeRestart:
 		c.markRecv()
-		// 对端 RESTART：触发本端 ICE 重启（拆除重建）
-		if fn := c.onRestart; fn != nil {
-			go fn()
-		}
+		// 对端 RESTART：触发本端 ICE 重启（拆除重建），模组 case 10 是 RUDP:719-721：
+		// 刷 lastRecvTime → INFO 日志 → triggerIceRestart()。
+		// 走 triggerIceRestart 而不是直接调回调，本端才吃到模组的两个闸门：closed（:502-504）
+		// 与一次会话只一次的 iceRestartTriggered（:505）——对端连发多帧 RESTART 只重挂一次。
+		c.rlog("info", "Received peer RESTART signal, trigger ICE Restart")
+		c.triggerIceRestart()
 	case rudpTypeVoice:
 		c.markRecv() // 忽略
 	}
@@ -1383,6 +1469,57 @@ func sortedU32(m map[uint32]*rudpPending) []uint32 {
 	return keys
 }
 
+// sendKeepalive 发一帧 KEEPALIVE（模组 sendKeepalive:1121-1134）：11B 裸帧、type=8、
+// seq=0、ack=nextExpectedSeq（:1127-1128），认证与路径包封走 sendFrame 统一出口
+// （对应 :1129-1130 的 finalizeFrame + sendOnPrimary）。
+// 守卫同 :1122 的 running && connected —— 本端 started 即 connected 位、closed 即 running 落。
+func (c *rudpConn) sendKeepalive() {
+	if !c.started.Load() || c.closed.Load() {
+		return
+	}
+	c.sendFrame(rudpFrame{Type: rudpTypeKeepalive, Ack: c.nextExpected.Load()})
+}
+
+// sendKeepaliveFrame 对外的保活入口（模组 sendKeepaliveFrame:443-446："热备线路保活用，
+// 不改变连接状态机"；调用点是 turn_bg.go 的 15s/15s 热备定时器，CM:12487）。
+func (c *rudpConn) sendKeepaliveFrame() { c.sendKeepalive() }
+
+// heartbeatTick 心跳拍：连续 rudpHeartbeatFailLimit 拍零入站判"单向死"
+// （模组 heartbeatTick:1136-1157，逐句对照；拍距与调度见 RUDP:430、:48）。
+// 判据只看"这一拍距内 lastRecv 有没有前移"（:1143）：前移就把轮次清零并认定这条道
+// 曾经双向通过（:1144-1145），否则轮次 +1（:1146 的 ++streak）。
+func (c *rudpConn) heartbeatTick() {
+	if !c.started.Load() || c.closed.Load() {
+		return // :1138-1140 !running || !connected
+	}
+	nowMs := time.Now().UnixMilli() // :1142
+	if c.lastRecv.Load() > c.lastHeartbeatMs {
+		// :1144-1145 复位两样：失败轮次 + "曾收到过"标记
+		c.heartbeatFailStreak.Store(0)
+		c.heartbeatEverRx = true
+	} else if c.heartbeatEverRx && c.heartbeatFailStreak.Add(1) >= rudpHeartbeatFailLimit {
+		// :1146 的 heartbeatEverRx 是必要闸门：从未收进过一个字节的（刚建、或纯单向可发）
+		// 不在这里判死，交给 retransmitCheck 的 24s/60s，免得 5s 就掐掉还没起流的合法链路。
+		c.rlog("warn", "One-way dead: %d heartbeats no rx, restart & re-punch", c.heartbeatFailStreak.Load())
+		// 模组次序 :1147-1151 —— WARN → onLinkDead → sendRestart(:1149) →
+		// triggerIceRestart(:1150) → close(:1151)，随后 return(:1152) 不再发这一拍的 keepalive。
+		// 本端 onLinkDead 按 reason 分流收在 closeWith 里（见 rudpReasonIsDead），而 closeWith
+		// 必须最后调：它一进来就置 closed，会让 sendRestart 的 sendFrame 静默不发这一帧。
+		// 差出来的只是上报相对发包的位置，两者互不依赖。
+		c.sendRestart()
+		c.triggerIceRestart()
+		c.closeWith(rudpReasonOneWayDead)
+		return
+	}
+
+	// 活着的这一拍：把锚点推到本拍起点（:1155），再发 KEEPALIVE（:1156）
+	c.lastHeartbeatMs = nowMs
+	c.sendKeepalive()
+}
+
+// keepaliveLoop 1s 心跳拍循环。模组挂在 keepaliveTask 上的不是裸发 keepalive，
+// 而是 heartbeatTick（RUDP:430），保活与单向死判定同一拍、先判死后发（:1142-1156），
+// 所以这里只当时钟。
 func (c *rudpConn) keepaliveLoop() {
 	t := time.NewTicker(rudpKeepaliveEvery)
 	defer t.Stop()
@@ -1391,10 +1528,7 @@ func (c *rudpConn) keepaliveLoop() {
 		case <-c.doneCh:
 			return
 		case <-t.C:
-			if c.closed.Load() {
-				return
-			}
-			c.sendFrame(rudpFrame{Type: rudpTypeKeepalive, Ack: c.nextExpected.Load()})
+			c.heartbeatTick()
 		}
 	}
 }
