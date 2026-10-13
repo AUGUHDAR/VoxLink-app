@@ -46,6 +46,27 @@ func contains(s, sub string) bool {
 	return false
 }
 
+// waitLocalService 等端口桥记下"最近给本机发过包的地址"（最多 3 秒）。
+func waitLocalService(t *testing.T, br *udpForwardBridge, port int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		br.mu.Lock()
+		var svc *net.UDPAddr
+		for _, pb := range br.bridges {
+			if pb.port == port {
+				svc = pb.localService.Load()
+			}
+		}
+		br.mu.Unlock()
+		if svc != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("桥始终没记下本机客户端地址，下行交付目标无从确定")
+}
+
 func loopbackUDP(t *testing.T, port int) *net.UDPConn {
 	t.Helper()
 	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
@@ -135,6 +156,9 @@ func TestVoiceDownlinkDeliveredToLocalClient(t *testing.T) {
 	if n, _, err := b.ReadFromUDP(drain); err == nil { // 排掉刚才那包的上行信封
 		_ = n
 	}
+	// 必须等桥把本机客户端地址记下来再发下行包：没记下时它会退回写给自己，
+	// 用例就会偶发收不到（UFB:117 与 :136-139 的两条分支）。
+	waitLocalService(t, br, port)
 
 	env := make([]byte, 2+len("downlink-voice"))
 	udpFwdWriteUint16(env, 0, port)
