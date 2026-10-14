@@ -1774,6 +1774,9 @@ func (e *connEngine) onPeerPort(data map[string]any) {
 func (e *connEngine) guestBridgeDown() {
 	e.guestTeardownP2P()
 	e.app.netLog("warn", "MC 隧道已断开，发起 ICE 重启重新打洞")
+	// 必须给界面发一条：本地桥已经随链路拆掉，成功卡上那个地址此刻是死的。
+	// 界面按 detail=link_lost 把卡片退回"连接中"；自动换道不走这里，仍保持成功卡。
+	e.notifyState(phaseP2P, statusTrying, "", "link_lost")
 	e.guestIceRestart()
 }
 

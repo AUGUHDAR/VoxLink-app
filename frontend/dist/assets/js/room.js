@@ -531,6 +531,14 @@
       if (status === "failed") {
         connLaneClosed(phase || conn.phase);
         connRender();
+      } else if (status === "trying" && payload.detail === "link_lost") {
+        // 隧道被拆、本地端口已随链路失效：成功卡必须收回，退回"连接中"（自动换道不发这条）。
+        conn.status = "trying";
+        conn.phase = phase || conn.phase || "p2p";
+        conn.address = "";
+        conn.detail = "";
+        connLaneClosed(phase || conn.phase);
+        connRender();
       }
       return;
     }
