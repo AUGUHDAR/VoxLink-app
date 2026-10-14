@@ -23,7 +23,9 @@ on:
         default: true
   push:
     tags:
+      # 应用端走独立号段且标签不带前缀（1.0.0 而不是 v1.0.0），所以两种形态都收。
       - 'v*'
+      - '[0-9]*'
 
 permissions:
   contents: write
@@ -269,9 +271,9 @@ jobs:
       - name: 建 Release（产物名自带版本/平台/架构，UPX 压缩项在正文标注）
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
-          name: VoxLink 应用端 ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
-          draft: ${{ github.event.inputs.draft }}
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: ${{ github.event.inputs.version || github.ref_name }}
+          draft: ${{ github.event.inputs.draft == 'true' }}
           files: out/*
           body: |
             两个版本：`VoxLink-UI-*`（图形界面）、`VoxLink-CLI-*`（给启动器集成，无窗口）。
