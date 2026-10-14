@@ -5,7 +5,7 @@
 "use strict";
 
 (function (VL) {
-  var FALLBACK_VERSION = "1.2.0-beta";
+  var FALLBACK_VERSION = "1.0.0-beta";
   // 加载器就给这三个，跟「创建房间」页的新建实例下拉保持一致
   var LOADERS = ["fabric", "forge", "neoforge"];
   var els = {};

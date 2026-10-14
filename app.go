@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	appVersion       = "1.2.0-beta"
+	appVersion       = "1.0.0-beta"
 	defaultServerURL = "https://p2p.wuhui.icu"
 	// clientProtocolVersion 是信令体里的客户端协议号，模组在 SignalingClient.java:199/284
 	// 两处硬编码发 7（语义即 ProtocolNegotiator.PROTOCOL_VERSION_7），服务端用 ">0" 当
