@@ -18,6 +18,7 @@ package main
 import (
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -203,7 +204,47 @@ func (s *modSyncState) resolveAsync(env modSyncEnv, manual, incompatible, knownD
 	for _, k := range all {
 		modSyncMarkSeen(ctx, k)
 	}
-	modSyncResolveBatch(all, 0, ctx, cb)
+
+	// 会话单飞：同清单进行中则跳过（2026-10-18 BUG4-L3 对齐，防双实例双跑；
+	// 释放点唯一——onFinished 恰好一次，由 modSyncDecRemaining 的 remaining 归零保证）
+	sk := modSyncResolveSessionKey(all)
+	if _, loaded := modSyncResolveActive.LoadOrStore(sk, struct{}{}); loaded {
+		modSyncLogWarn("resolve session in flight, skip duplicate")
+		if cb.onFinished != nil {
+			cb.onFinished(0)
+		}
+		return
+	}
+	guarded := modSyncResolveCallback{
+		onResolved: cb.onResolved,
+		onFinished: func(resolvedCount int) {
+			modSyncResolveActive.Delete(sk)
+			if cb.onFinished != nil {
+				cb.onFinished(resolvedCount)
+			}
+		},
+	}
+	modSyncResolveBatch(all, 0, ctx, guarded)
+}
+
+// modSyncResolveActive 进行中的解析会话（清单键），防同清单双跑（BUG4-L3）。
+var modSyncResolveActive sync.Map
+
+// modSyncResolveSessionKey 清单键：条目键排序后拼接（对齐 sessionKey）。
+func modSyncResolveSessionKey(entries []*modSyncEntry) string {
+	keys := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e == nil {
+			continue
+		}
+		if e.ProjectID != "" {
+			keys = append(keys, "mr:"+e.ProjectID)
+		} else if nb := modSyncNormalizeFileName(e.FileName); nb != "" {
+			keys = append(keys, "f:"+nb)
+		}
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "|")
 }
 
 // modSyncResolveBatch（:140-159）

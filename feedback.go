@@ -44,8 +44,8 @@ const (
 	feedbackMaxTotalBytes = 500 * 1024 * 1024
 	// feedbackRoute 提交端点（:219 "?route=/feedback/submit"）。
 	feedbackRoute = "/feedback/submit"
-	// feedbackDefaultServer 空地址时的默认信令服务器（:207 "https://p2p.wuhui.icu"）。
-	feedbackDefaultServer = "https://p2p.wuhui.icu"
+	// feedbackDefaultServer 空地址时的默认信令服务器（:207 "https://link.voxdev.top"）。
+	feedbackDefaultServer = "https://link.voxdev.top"
 	// feedbackBoundaryPrefix multipart boundary 前缀（:133 "----VoxLinkFB" + 32 位 hex UUID）。
 	feedbackBoundaryPrefix = "----VoxLinkFB"
 	// feedbackSubmitTimeout 整次提交超时 30 分钟（:153 Duration.ofMinutes(30)）——

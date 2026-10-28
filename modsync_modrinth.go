@@ -628,7 +628,8 @@ func modrinthDoDownload(cli *http.Client, rawURL, expectedSha512, expectedSha1, 
 	}
 
 	target := filepath.Join(modsDir, fileName)
-	part := filepath.Join(modsDir, fileName+".part")
+	// 唯一 .part：并发/残留写入不再互相踩踏（2026-10-18 BUG4-L4 对齐）
+	part := filepath.Join(modsDir, fileName+"."+strconv.FormatInt(time.Now().UnixNano(), 10)+".part")
 	sha512h := sha512.New()
 	sha1h := sha1.New()
 
@@ -723,13 +724,20 @@ func modrinthDoDownload(cli *http.Client, rawURL, expectedSha512, expectedSha1, 
 	}
 
 	// 原子改名（:419-429）：Go 的 os.Rename 在 POSIX 上是原子替换；Windows 上
-	// MoveFileEx(REPLACE_EXISTING) 同卷原子。跨卷失败 → 清 .part 后报错，
-	// 与 Java 的 AtomicMoveNotSupportedException→普通 move→仍失败即清理等价。
-	if rerr := os.Rename(part, target); rerr != nil {
-		modrinthQuietDelete(part)
-		return 0, rerr
+	// MoveFileEx(REPLACE_EXISTING) 同卷原子。改名短退避重试 3 次（杀软/占用锁瞬态，
+	// 2026-10-18 BUG4-L4 对齐）；3 次全灭才清 .part 报错。
+	var lastRenErr error
+	for mv := 0; mv < 3; mv++ {
+		lastRenErr = os.Rename(part, target)
+		if lastRenErr == nil {
+			return total, nil
+		}
+		if mv < 2 {
+			time.Sleep((150 << uint(mv)) * time.Millisecond)
+		}
 	}
-	return total, nil
+	modrinthQuietDelete(part)
+	return 0, lastRenErr
 }
 
 // modrinthMirrorDownloadURL：MR CDN / forgecdn → MCIM 镜像；其余原样返回（:626-648）。

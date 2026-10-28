@@ -8,7 +8,7 @@ The standalone desktop client of VoxLink. **No mod required** — it exists for 
 
 | | |
 |---|---|
-| Official Website | https://p2p.wuhui.icu/ |
+| Official Website | https://link.voxdev.top/ |
 | VoxLink mod (GitHub) | https://github.com/AUGUHDAR/VoxLink |
 | MC Wiki (mcmod.cn) | https://www.mcmod.cn/class/28295.html |
 | Modrinth | https://modrinth.com/mod/voxlink |
@@ -73,7 +73,7 @@ Please say what your network looks like — home broadband? Campus WiFi? Phone h
 
 **UDP hole punching + STUN** for NAT detection and punching, a custom **reliable UDP transport** carrying game traffic once the path is up, **standard TURN (RFC 5766)** and **peer relay** as fallbacks. The signaling server only swaps addresses during the handshake; game data stays P2P. Written in Go with a webview UI, CLI build has no GUI dependency at all. Some code generated with AI help.
 
-Website: `https://p2p.wuhui.icu/`
+Website: `https://link.voxdev.top/`
 
 ---
 
@@ -87,7 +87,7 @@ VoxLink 的独立桌面客户端，**不需要装模组**。它为模组覆盖�
 
 | | |
 |---|---|
-| 官网 | https://p2p.wuhui.icu/ |
+| 官网 | https://link.voxdev.top/ |
 | VoxLink 模组（GitHub） | https://github.com/AUGUHDAR/VoxLink |
 | MC百科 | https://www.mcmod.cn/class/28295.html |
 | Modrinth | https://modrinth.com/mod/voxlink |
@@ -154,4 +154,4 @@ CLI 版就是为被集成而生的：每条命令回答一行 JSON，建房/加�
 
 **UDP 打洞 + STUN** 做 NAT 探测与打洞，链路建立后用自研 **可靠 UDP 传输** 承载游戏流量，失败时由 **标准 TURN（RFC 5766）** 与 **玩家中继** 兜底。信令服务器仅在握手阶段交换地址，游戏数据不经过服务器。Go 实现，界面用 webview，CLI 版零 GUI 依赖。部分代码由 AI 辅助生成。
 
-官网：`https://p2p.wuhui.icu/`
+官网：`https://link.voxdev.top/`

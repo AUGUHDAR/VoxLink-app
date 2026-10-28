@@ -119,6 +119,21 @@ func (e *connEngine) trackTcpPuncher(p *tcpPuncher) {
 	e.mu.Unlock()
 }
 
+// removeTcpPair host 桥死即出账：hTcpPairs 是获胜谓词的数据源（BUG1a 对齐），
+// 不移除则桥断后 p2pPeerConnected/connectionWonFor 永真，后续重连/重打洞全被吞。
+func (e *connEngine) removeTcpPair(conns ...net.Conn) {
+	e.mu.Lock()
+	for _, c := range conns {
+		for i := 0; i < len(e.hTcpPairs); i++ {
+			if e.hTcpPairs[i] == c {
+				e.hTcpPairs = append(e.hTcpPairs[:i], e.hTcpPairs[i+1:]...)
+				i--
+			}
+		}
+	}
+	e.mu.Unlock()
+}
+
 // tryTcpHolePunch guest 侧邀约：本端锥形、cycle≥1 且未连通时发 tcp_punch_info。
 // go 丢失看门狗：35s 后释放占位，下轮继续邀约。
 func (e *connEngine) tryTcpHolePunch(cycle int, localNat natClass, myMappedIP string) {
@@ -235,8 +250,19 @@ func (e *connEngine) onTcpPunchSocket(conn net.Conn, isHost bool, peerID string)
 			_ = conn.Close()
 			return
 		}
-		local, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", mcPort), bridgeDialTimeout)
-		if err != nil {
+		// 本地 MC 端口就绪竞态：TCP 打洞可能早于房主世界开完，按重试窗重连
+		// （对齐 bridge.go bDialLocalMC 的窗口纪律，而不是一拒即弃活打洞连接）
+		var local net.Conn
+		dl := time.Now().Add(bridgeDialWindow)
+		for time.Now().Before(dl) {
+			c, derr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", mcPort), bridgeDialTimeout)
+			if derr == nil {
+				local = c
+				break
+			}
+			time.Sleep(bridgeDialRetry)
+		}
+		if local == nil {
 			_ = conn.Close()
 			e.app.netLog("error", "TCP 打洞成功但本地 MC 端口连接失败")
 			return
@@ -247,7 +273,10 @@ func (e *connEngine) onTcpPunchSocket(conn net.Conn, isHost bool, peerID string)
 		e.mu.Lock()
 		e.hTcpPairs = append(e.hTcpPairs, conn, local)
 		e.mu.Unlock()
-		go pumpTcpPair(conn, local)
+		go func() {
+			pumpTcpPair(conn, local)
+			e.removeTcpPair(conn, local) // 桥死出账，获胜谓词只数活对（BUG1a 对齐）
+		}()
 		e.app.netLog("info", "TCP 打洞成功，host 桥已建立")
 		return
 	}

@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	appVersion       = "1.0.0-beta"
-	defaultServerURL = "https://p2p.wuhui.icu"
+	appVersion       = "1.0.1"
+	defaultServerURL = "https://link.voxdev.top"
 	// clientProtocolVersion 是信令体里的客户端协议号，模组在 SignalingClient.java:199/284
 	// 两处硬编码发 7（语义即 ProtocolNegotiator.PROTOCOL_VERSION_7），服务端用 ">0" 当
 	// "新客户端"标记（roommanager.go:882）。

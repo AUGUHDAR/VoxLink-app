@@ -11,13 +11,13 @@ import (
 // ---- URL 拼接 ----
 
 func TestBuildRequestURL(t *testing.T) {
-	got, err := buildRequestURL("https://p2p.wuhui.icu", "/room/list", url.Values{
+	got, err := buildRequestURL("https://link.voxdev.top", "/room/list", url.Values{
 		"page": {"1"}, "size": {"20"}, "clientType": {"mod"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.HasPrefix(got, "https://p2p.wuhui.icu/?") {
+	if !strings.HasPrefix(got, "https://link.voxdev.top/?") {
 		t.Fatalf("bad prefix: %s", got)
 	}
 	for _, want := range []string{"route=%2Froom%2Flist", "page=1", "size=20", "clientType=mod"} {
@@ -38,8 +38,8 @@ func TestBuildRequestURLRejectsBadScheme(t *testing.T) {
 
 func TestWSURLFrom(t *testing.T) {
 	cases := map[string]string{
-		"https://p2p.wuhui.icu":    "wss://p2p.wuhui.icu/ws",
-		"https://p2p.wuhui.icu/":   "wss://p2p.wuhui.icu/ws",
+		"https://link.voxdev.top":    "wss://link.voxdev.top/ws",
+		"https://link.voxdev.top/":   "wss://link.voxdev.top/ws",
 		"http://127.0.0.1:8080":    "ws://127.0.0.1:8080/ws",
 		"http://127.0.0.1:8080/xx": "ws://127.0.0.1:8080/xx/ws",
 	}
@@ -127,7 +127,7 @@ func TestSettingsRoundTrip(t *testing.T) {
 	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
 
 	got := a.GetSettings()
-	if !strings.Contains(got, `"serverUrl":"https://p2p.wuhui.icu"`) || !strings.Contains(got, `"theme":"light"`) {
+	if !strings.Contains(got, `"serverUrl":"https://link.voxdev.top"`) || !strings.Contains(got, `"theme":"light"`) {
 		t.Fatalf("defaults wrong: %s", got)
 	}
 	if !strings.Contains(got, `"version":"`+appVersion+`"`) {
@@ -136,7 +136,7 @@ func TestSettingsRoundTrip(t *testing.T) {
 
 	// 契约：SaveSettings 忽略参数里的 serverUrl，只应用 theme；返回 serverUrl 恒为默认
 	resp := a.SaveSettings(`{"serverUrl":"https://example.com/","theme":"dark"}`)
-	if !strings.Contains(resp, `"ok":true`) || !strings.Contains(resp, `"serverUrl":"https://p2p.wuhui.icu"`) || !strings.Contains(resp, `"theme":"dark"`) {
+	if !strings.Contains(resp, `"ok":true`) || !strings.Contains(resp, `"serverUrl":"https://link.voxdev.top"`) || !strings.Contains(resp, `"theme":"dark"`) {
 		t.Fatalf("save response wrong: %s", resp)
 	}
 
@@ -145,7 +145,7 @@ func TestSettingsRoundTrip(t *testing.T) {
 	b.settingsPath = a.settingsPath
 	b.loadSettings()
 	got2 := b.GetSettings()
-	if !strings.Contains(got2, `"serverUrl":"https://p2p.wuhui.icu"`) || !strings.Contains(got2, `"theme":"dark"`) {
+	if !strings.Contains(got2, `"serverUrl":"https://link.voxdev.top"`) || !strings.Contains(got2, `"theme":"dark"`) {
 		t.Fatalf("persisted settings wrong: %s", got2)
 	}
 }
@@ -158,7 +158,7 @@ func TestSaveSettingsIgnoresServerURL(t *testing.T) {
 	if !strings.Contains(resp, `"ok":true`) {
 		t.Fatalf("serverUrl should be ignored, got: %s", resp)
 	}
-	if !strings.Contains(resp, `"serverUrl":"https://p2p.wuhui.icu"`) {
+	if !strings.Contains(resp, `"serverUrl":"https://link.voxdev.top"`) {
 		t.Fatalf("serverUrl must stay default: %s", resp)
 	}
 }

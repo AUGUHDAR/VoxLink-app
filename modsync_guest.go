@@ -13,11 +13,12 @@ package main
 //   SelectScreen 的下载环 → ModSyncDownload / ModSyncCancelDownload（事件 modsync:progress / modsync:download）
 //
 // 重试预算（全部有 Java file:line 背书，勿改）：
-//   READY_RETRIES = 5                       ModSyncGuestService.java:43
-//   maxAttempts   = READY_RETRIES*2 = 10    :286（"瞬态失败也要重试"）
 //   单次请求超时   8s                        :299 `.get(8L, TimeUnit.SECONDS)`
-//   总时限        12000ms                    :289（与服务端长轮询 modsRequestWaitSec=12
-//                                             server-go/modsmanifest.go:23 同值）
+//   maxAttempts   = 30（字面量）             :286（2026-10-24 对齐：快速 not-ready 轮询
+//                                             ~2.5s/轮，原 10 次会先于墙钟耗尽）
+//   总时限        45000ms                    :289（2026-10-24 对齐：大整合包房主清单构建
+//                                             实测 22~31 秒，12 秒必超时→裸连被踢；
+//                                             服务端长轮询仍 12s/次，串行覆盖 45s）
 //   瞬态失败 sleep 1500ms                    :313
 //   supported 但未 ready sleep 2000ms        :346
 //   睡眠按 100ms 粒度可中断                   cancellableSleep :241-265
@@ -55,9 +56,9 @@ const (
 )
 
 const (
-	modSyncReadyRetries   = 5                // ModSyncGuestService.java:43
 	modSyncFetchPerTry    = 8 * time.Second  // :299
-	modSyncFetchDeadline  = 12 * time.Second // :289
+	modSyncFetchDeadline  = 45 * time.Second // :289（2026-10-24 对齐：大包清单构建实测 22~31s）
+	modSyncFetchAttempts  = 30               // :286 maxAttempts（快速轮询 ~2.5s/轮，10 次会先于墙钟耗尽）
 	modSyncTransientSleep = 1500 * time.Millisecond
 	modSyncNotReadySleep  = 2000 * time.Millisecond
 	modSyncSleepStep      = 100 * time.Millisecond
@@ -217,7 +218,7 @@ func (a *App) modSyncRoomSupportsManifest(roomCode string) bool {
 func (a *App) modSyncFetchWithRetry(roomCode, scope string) modSyncFetchResult {
 	sawNotReady := false
 	sawTransient := false
-	maxAttempts := modSyncReadyRetries * 2
+	maxAttempts := modSyncFetchAttempts
 	deadline := time.Now().Add(modSyncFetchDeadline)
 
 	for attempt := 0; attempt < maxAttempts && time.Now().Before(deadline); attempt++ {

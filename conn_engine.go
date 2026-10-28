@@ -446,6 +446,7 @@ func (e *connEngine) teardown() {
 	e.tcpPunchers = nil
 	e.hRelayDispatched = nil
 	resetRelayCandidates(e) // 退房清账：批次计时器/current/90s 总闸一起归零（CM:13486 clearRelayTracking）
+	clearLocalIPCache()    // CM:4345 连接级重置作废本地 IP 候选缓存
 	e.mu.Unlock()
 
 	// 定时器/热备在锁外收尾（goroutine 只靠这些闭包停，漏关就是常驻泄漏）
@@ -831,17 +832,87 @@ func (e *connEngine) filterAddressFamilyCandidate(ip string, port int, tag strin
 	return ip
 }
 
-// getLocalIP 取本机局域网 IP（UDP connect 探测默认路由出口，不实际发包）。
+// localIPCache / localIPAt 对齐 StunDetector 的 30s 缓存（:28-30,74-87）；
+// 连接级重置时由 clearLocalIPCache 清空（CM:4345 同位点）。
+var (
+	localIPMu    sync.Mutex
+	localIPCache string
+	localIPAt    time.Time
+)
+
+// clearLocalIPCache = StunDetector.clearLocalCaches()：退房/新连接时作废候选缓存。
+func clearLocalIPCache() {
+	localIPMu.Lock()
+	localIPCache = ""
+	localIPAt = time.Time{}
+	localIPMu.Unlock()
+}
+
+// getLocalIP 取本机局域网 IP：全候选打分选优（对齐 StunDetector.probeLocalIpAddress
+// 2026-10-18 修复版——首个命中受网卡枚举顺序干扰，VPN/虚拟网卡段误报误判两端翻车）。
 func getLocalIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return ""
+	localIPMu.Lock()
+	if localIPCache != "" && time.Since(localIPAt) < 30*time.Second {
+		v := localIPCache
+		localIPMu.Unlock()
+		return v
 	}
-	defer conn.Close()
-	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
-		return addr.IP.String()
+	localIPMu.Unlock()
+
+	best, bestScore := "", -1000
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, ni := range ifaces {
+			if ni.Flags&net.FlagLoopback != 0 || ni.Flags&net.FlagUp == 0 {
+				continue
+			}
+			addrs, _ := ni.Addrs()
+			for _, ad := range addrs {
+				ipnet, ok := ad.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				ip4 := ipnet.IP.To4()
+				if ip4 == nil || ip4.IsLoopback() {
+					continue
+				}
+				s := localIPScore(ip4.String())
+				if s > bestScore {
+					bestScore, best = s, ip4.String()
+				}
+			}
+		}
 	}
-	return ""
+	if best != "" {
+		localIPMu.Lock()
+		localIPCache, localIPAt = best, time.Now()
+		localIPMu.Unlock()
+	}
+	return best
+}
+
+// localIPScore = StunDetector.scoreLocalCandidate：RFC1918(40) > VPN 段 26/8、
+// 100.64/10(20) > 其他(10)；VBox Host-Only 192.168.56.x 垫底(仅唯一候选时兜底)。
+// 26/8 不一刀切排除（纯 Radmin 组网 V98P3T 形态保留）。
+func localIPScore(ip string) int {
+	parts := strings.Split(ip, ".")
+	o2 := -1
+	if len(parts) > 1 {
+		if n, e := strconv.Atoi(parts[1]); e == nil {
+			o2 = n
+		}
+	}
+	score := 10
+	if strings.HasPrefix(ip, "10.") || strings.HasPrefix(ip, "192.168.") ||
+		(strings.HasPrefix(ip, "172.") && o2 >= 16 && o2 <= 31) {
+		score = 40
+	} else if strings.HasPrefix(ip, "26.") || (strings.HasPrefix(ip, "100.") && o2 >= 64 && o2 <= 127) {
+		score = 20
+	}
+	if strings.HasPrefix(ip, "192.168.56.") {
+		score -= 100
+	}
+	return score
 }
 
 func localPort(uc *net.UDPConn) int {
@@ -2004,10 +2075,12 @@ func (e *connEngine) setRoomHostSymmetric(v bool) {
 }
 
 // connectionWonFor = CM:4268 的 connectionWon.get()：这个房客已经有链路了。
+// 2026-10-18 BUG1a 对齐：TCP 打洞活桥同算获胜（hasActiveBridgePairs 同义），
+// 否则 host_stun_array:390 会在活桥存在时整组丢掉 mapped 重发。
 func (e *connEngine) connectionWonFor(peer *hostPeer) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return peer != nil && peer.rudp != nil
+	return peer != nil && (peer.rudp != nil || len(e.hTcpPairs) > 0)
 }
 
 // hostOnJoinRequest 收到（服务端代发的）join_request → 起 host 侧引擎。

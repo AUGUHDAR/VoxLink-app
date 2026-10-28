@@ -40,7 +40,7 @@
     {
       name: ["voxlink.links.site", "官网"],
       desc: ["voxlink.app.links.site_desc", "VoxLink 官方网站，下载与说明都在上面"],
-      url: "https://p2p.wuhui.icu/"
+      url: "https://link.voxdev.top/"
     },
     {
       name: ["voxlink.links.discord", "Discord"],

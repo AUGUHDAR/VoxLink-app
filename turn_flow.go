@@ -130,11 +130,17 @@ func (e *connEngine) p2pGuestDone() bool {
 	return e.gP2PDone
 }
 
-// p2pPeerConnected host 侧：任一房客 rudp/TURN 通路已建立。
+// p2pPeerConnected host 侧：任一房客 rudp/TURN 通路已建立，或 TCP 打洞活桥仍在。
+// （对齐 2026-10-18 BUG1a 修复：获胜判据只认 rudp/TURN 时，TCP 打洞赢后 host 侧
+// 打洞不停、自动中继对活桥误触发；guest 侧 tcp_punch.go 会置 gP2PDone，
+// 不扩判据则两端认知分裂。hTcpPairs 桥死即出账，见 removeTcpPair。）
 func (e *connEngine) p2pPeerConnected() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.turnTransport != nil {
+		return true
+	}
+	if len(e.hTcpPairs) > 0 {
 		return true
 	}
 	for _, p := range e.hPeers {
